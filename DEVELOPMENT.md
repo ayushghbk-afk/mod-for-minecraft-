@@ -33,7 +33,7 @@ node --check proxy/server.mjs
 for f in behavior_packs/autonomous_ai_bot/scripts/**/*.js behavior_packs/autonomous_ai_bot/scripts/*.js; do node --check "$f"; done
 ```
 
-GitHub Actions is defined in `.github/workflows/build-addon.yml`. Every push, pull request and manual dispatch runs tests, syntax validation and `npm run build`, then uploads the `.mcaddon` bundle and both `.mcpack` files as an artifact. Pushing a tag such as `v1.0.1` additionally creates a GitHub Release containing the generated add-on files.
+GitHub Actions is defined in `.github/workflows/build-addon.yml`. Every push, pull request and manual dispatch runs tests, syntax validation and `npm run build`, then uploads a **bedrock-mobile-modpack** artifact (`AI-Bot-Bedrock-Mobile.mcaddon` plus `.mcpack` files). Pushes also update the `bedrock-mobile-latest` GitHub Release so phones can download the pack. Pushing a tag such as `v1.0.1` additionally creates a versioned GitHub Release.
 
 The Node tests cover action rejection, plan limits, JSON parsing, task progress/pause/resume/completion, bounded memory, intent parsing, key removal and provider response validation. Files importing `@minecraft/server` cannot be executed by Node because that module exists only inside Bedrock; use the live checklist below for those parts.
 
