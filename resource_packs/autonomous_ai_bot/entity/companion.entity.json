@@ -1,0 +1,22 @@
+{
+  "format_version": "1.10.0",
+  "minecraft:client_entity": {
+    "description": {
+      "identifier": "aibot:companion",
+      "materials": {
+        "default": "entity_alphatest"
+      },
+      "textures": {
+        "default": "textures/entity/ai_bot"
+      },
+      "geometry": {
+        "default": "geometry.aibot.player"
+      },
+      "render_controllers": ["controller.render.aibot.player"],
+      "spawn_egg": {
+        "base_color": "#3b82f6",
+        "overlay_color": "#dbeafe"
+      }
+    }
+  }
+}

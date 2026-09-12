@@ -1,0 +1,18 @@
+{
+  "format_version": "1.8.0",
+  "render_controllers": {
+    "controller.render.aibot.player": {
+      "geometry": "Geometry.default",
+      "materials": [ { "*": "Material.default" } ],
+      "textures": [ "Texture.default" ],
+      "part_visibility": [
+        { "head": "1" },
+        { "body": "1" },
+        { "leftArm": "1" },
+        { "rightArm": "1" },
+        { "leftLeg": "1" },
+        { "rightLeg": "1" }
+      ]
+    }
+  }
+}
