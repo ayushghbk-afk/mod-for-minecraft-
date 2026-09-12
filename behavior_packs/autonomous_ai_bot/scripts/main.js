@@ -10,6 +10,7 @@ import { handleChat } from "./chat.js";
 import { isCommandMessage, parseBotCommand } from "./core/intent-parser.js";
 import { showControlPanel, showCreateBot } from "./ui/control-panel.js";
 import { SCRIPT_VERSION } from "./core/version.js";
+import { commandHint, talkHint } from "./core/hints.js";
 
 export { SCRIPT_VERSION };
 
@@ -23,7 +24,7 @@ function safeSubscribe(signal, callback) {
 function reportFailure(player, context, error) {
   const text = String(error?.message || error).slice(0, 220);
   console.error(`[aibot] ${context}: ${error}`);
-  try { player?.sendMessage(`§c[AI Bot] ${context} failed:§r ${text}\n§eRun §f!aibot info§e and check that the game version supports the pack.`); } catch { /* player left */ }
+  try { player?.sendMessage(`§c[AI Bot] ${context} failed:§r ${text}\n§eRun §f/aibot:info§e (or §f!aibot info§e) and check that the game version supports the pack.`); } catch { /* player left */ }
 }
 
 function isBotMention(message) {
@@ -178,6 +179,80 @@ controller.diagnostics.scriptEvent = safeSubscribe(system.afterEvents?.scriptEve
   system.run(() => handleChat(player, text, controller).catch((error) => reportFailure(player, "Scriptevent command", error)));
 }) ? "available (/scriptevent aibot:cmd <command> ...)" : "unavailable";
 
+// --- DUPLICATE PACK DETECTION ---
+// Importing a newer .mcaddon does NOT remove an older copy whose manifest
+// UUIDs differ, and a world can end up with BOTH behavior packs active: every
+// event is then handled twice by two independent script instances with two
+// separate bot registries. That is what produces doubled "[AI Bot …] loaded"
+// banners, two bots with the same name and the infamous "No bot is assigned
+// to you" from the copy that did not create the bot. World dynamic properties
+// are shared by all scripts in a world, so each instance advertises itself
+// with a heartbeat and we can detect — and explain — the overlap. (An old
+// copy that predates the heartbeat cannot be seen this way, which is why the
+// join message also tells players what two banners mean.)
+const INSTANCE_ID = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e12).toString(36)}`;
+const HEARTBEAT_PREFIX = "aibot:hb:";
+const HEARTBEAT_TTL_MS = 60000;
+
+function writeHeartbeat() {
+  try {
+    world.setDynamicProperty(`${HEARTBEAT_PREFIX}${INSTANCE_ID}`, JSON.stringify({ v: SCRIPT_VERSION, at: Date.now() }));
+  } catch { /* world properties unavailable (early execution or a Node test) */ }
+}
+
+function findOtherLiveInstance() {
+  try {
+    if (typeof world.getDynamicPropertyIds !== "function") return null;
+    const now = Date.now();
+    let other = null;
+    for (const id of world.getDynamicPropertyIds()) {
+      if (!id.startsWith(HEARTBEAT_PREFIX) || id === `${HEARTBEAT_PREFIX}${INSTANCE_ID}`) continue;
+      let beat = null;
+      try { beat = JSON.parse(String(world.getDynamicProperty(id) || "null")); } catch { beat = null; }
+      if (!beat || typeof beat.at !== "number" || now - beat.at > HEARTBEAT_TTL_MS) {
+        try { world.setDynamicProperty(id, undefined); } catch { /* read-only moment */ }
+        continue; // dead instance — reclaim its property
+      }
+      other = { id: id.slice(HEARTBEAT_PREFIX.length), version: String(beat.v || "unknown"), at: beat.at };
+    }
+    return other;
+  } catch { return null; }
+}
+
+const duplicateWarned = new Set();
+
+function warnAboutDuplicate(other) {
+  controller.diagnostics.duplicate = `DETECTED — v${other.version} is running alongside this v${SCRIPT_VERSION}`;
+  // Exactly one of the two instances warns (deterministic id ordering), so
+  // the player gets one clear instruction instead of two overlapping ones.
+  if (!(other.id > INSTANCE_ID)) return;
+  const lines = [
+    `§c⚠ Two copies of the AI Bot script are running in this world§r (this one is v${SCRIPT_VERSION}, the other is v${other.version}).`,
+    "§eThat causes doubled messages and §f\"No bot is assigned to you\"§e errors. Fix it:§r",
+    "§fWorld Settings → Add-Ons / Behavior Packs → deactivate the older §fAutonomous AI Bot§f pack§r, then save and reload the world."
+  ];
+  for (const player of world.getPlayers()) {
+    if (duplicateWarned.has(player.id)) continue;
+    duplicateWarned.add(player.id);
+    try { player.sendMessage(lines.join("\n")); } catch { /* player left */ }
+  }
+}
+
+function sweepDuplicateInstances() {
+  writeHeartbeat();
+  const other = findOtherLiveInstance();
+  if (other) warnAboutDuplicate(other);
+  return other;
+}
+
+// Dynamic properties cannot be written during early execution, so the first
+// heartbeat waits one tick; afterwards the tick loop keeps it fresh.
+system.runTimeout(() => { sweepDuplicateInstances(); }, 1);
+
+export function __duplicateGuardForTests() {
+  return { instanceId: INSTANCE_ID, sweep: sweepDuplicateInstances, warned: duplicateWarned };
+}
+
 safeSubscribe(world.afterEvents?.entityDie, (event) => {
   if (event.deadEntity?.typeId === "aibot:companion") controller.handleDeath(event.deadEntity);
 });
@@ -263,7 +338,7 @@ function tryAutoSummon(player, reason = "initial spawn") {
       console.warn(`[aibot] auto-summoned ${chosenName} for ${player.name} (${reason})`);
       try {
         player.sendMessage(`§a[AI Bot] Auto-summoned ${chosenName} for you! §rLike Verity mod, your bot appears when you create a world.`);
-        player.sendMessage(`§eUse §f!aibot help §efor commands, §fcompass§e for menu, or say §f\"${chosenName}, follow me\"§e.`);
+        player.sendMessage(`§eUse §f${commandHint(controller, "help")}§e for commands, a §fcompass§e for the menu, or ${talkHint(controller, chosenName)}§e.`);
       } catch {}
       try { result.agent.follow(); } catch {}
       // Mark world as having auto-summoned at least once, so we don't spam on every reload
@@ -286,13 +361,19 @@ function tryAutoSummon(player, reason = "initial spawn") {
  * single most confusing thing this pack used to do.
  */
 export function welcomeLines(chatOk, slashOk) {
+  const lines = [];
   if (chatOk) {
-    return [`Type §e!aibot create Steve§r to spawn your bot, or §e!aibot help§r. Hold a §fcompass§r and use it for a menu without chat.`];
+    lines.push(`Type §e!aibot create Steve§r to spawn your bot, or §e!aibot help§r. Hold a §fcompass§r and use it for a menu without chat.`);
+  } else {
+    lines.push(`§eChat commands are unavailable on this game build — that is why §f!aibot …§e in chat does nothing.§r`);
+    if (slashOk) lines.push(`Run §e/aibot:create Steve§r like any slash command, or hold a §fcompass§r and use it for the menu.`);
+    else lines.push(`Hold a §fcompass§r and use it — the menu creates and controls a bot without any commands.`);
+    lines.push(`With cheats enabled, §e/scriptevent aibot:cmd create Steve§r also works.`);
   }
-  const lines = [`§eChat commands are unavailable on this game build — that is why §f!aibot …§e in chat does nothing.§r`];
-  if (slashOk) lines.push(`Run §e/aibot:create Steve§r like any slash command, or hold a §fcompass§r and use it for the menu.`);
-  else lines.push(`Hold a §fcompass§r and use it — the menu creates and controls a bot without any commands.`);
-  lines.push(`With cheats enabled, §e/scriptevent aibot:cmd create Steve§r also works.`);
+  // Two banners with different versions mean two behavior packs are active at
+  // once — the root cause of doubled messages and "No bot is assigned to you".
+  // An old duplicate cannot be detected from script state, so say it here.
+  lines.push(`§7Seeing two "[AI Bot …] Script loaded" banners? Two copies of this pack are active — deactivate the older AI Bot behavior pack in this world's settings.§r`);
   return lines;
 }
 
@@ -305,6 +386,9 @@ safeSubscribe(world.afterEvents?.playerSpawn, (event) => {
       const chatOk = !chatSource.startsWith("NONE");
       event.player.sendMessage(`§b[AI Bot v${SCRIPT_VERSION}]§r Script loaded (chat: ${chatOk ? "§aok§r" : "§cunavailable§r"}).`);
       for (const line of welcomeLines(chatOk, slashCommandsReady)) event.player.sendMessage(line);
+      // A second copy that was already running shows up here too, so the
+      // explanation arrives with the join message instead of up to a minute later.
+      sweepDuplicateInstances();
     } catch { /* player despawned during the delay */ }
   }, 10);
 
@@ -344,8 +428,20 @@ system.runTimeout(() => {
 
 controller.diagnostics.tickJob = Boolean(system.runInterval(() => {
   try { controller.tick(); } catch (error) { console.error(`[aibot] tick failed: ${error}`); }
+  // Heartbeat + duplicate sweep every ~15 s (this interval runs every 5 game
+  // ticks and tickCount counts runs, so 60 runs = 300 ticks = 15 s); cheap,
+  // and it catches a second copy being activated mid-session.
+  if (controller.tickCount % 60 === 0) { try { sweepDuplicateInstances(); } catch { /* never fatal */ } }
 }, 5));
 
 globalThis.__aibotController = controller;
 
-export function __resetForTests() { controller.agents.clear(); }
+export function __resetForTests() {
+  controller.agents.clear();
+  // forPlayer() now re-scans dimensions before reporting "no bot", so a test
+  // reset must also clear leftover companion entities — otherwise the rescan
+  // resurrects them and the bot-count guard behaves like a crowded world.
+  for (const dimensionId of ["overworld", "nether", "the_end"]) {
+    try { for (const entity of world.getDimension(dimensionId).getEntities({ type: "aibot:companion" })) entity.remove(); } catch { /* dimension unavailable */ }
+  }
+}

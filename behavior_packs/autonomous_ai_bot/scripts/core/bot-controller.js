@@ -11,6 +11,7 @@ import { fallbackPlan, safeFallback } from "./planner.js";
 import { providerFor } from "./ai-provider.js";
 import { StuckDetector } from "./navigation.js";
 import { validateNamedCommand, canUseBot } from "./permissions.js";
+import { commandHint, talkHint, noBotMessage } from "./hints.js";
 
 const BOT_ENTITY_ID = "aibot:companion";
 const DIMENSIONS = ["overworld", "nether", "the_end"];
@@ -407,7 +408,8 @@ export class BotController {
     this.diagnostics = {
       scriptVersion: "unknown", chatSource: "unbound", itemUseSource: "unbound",
       slashCommands: "unknown (startup event has not fired yet)", scriptEvent: "unbound",
-      engineStarted: false, tickJob: false, spawnFailures: 0, lastSpawnError: ""
+      engineStarted: false, tickJob: false, spawnFailures: 0, lastSpawnError: "",
+      duplicate: "not checked yet"
     };
   }
   register(entity) {
@@ -426,9 +428,34 @@ export class BotController {
   all() { return [...this.agents.values()]; }
   byName(name) { const wanted = String(name || "").toLowerCase(); return this.all().find((agent) => agent.name.toLowerCase() === wanted); }
   forPlayer(player, name = "") {
+    const found = this.lookupForPlayer(player, name);
+    if (found) return found;
+    // A companion that exists in the world but is missing from THIS controller's
+    // registry (chunk unloaded and entityLoad was missed, or a second copy of
+    // this pack having spawned the bot) must never be reported as
+    // "No bot is assigned to you". One cheap dimension re-scan fixes all of
+    // those before any message claims the player has no bot.
+    try { this.restore(); } catch { /* dimension query unavailable */ }
+    return this.lookupForPlayer(player, name);
+  }
+  lookupForPlayer(player, name = "") {
     const named = name ? this.byName(name) : null;
-    if (named && canUseBot(player, named, named.config)) return named;
-    return this.all().find((agent) => (!agent.ownerId || agent.ownerId === player.id || agent.ownerName === player.name) && canUseBot(player, agent, agent.config)) || null;
+    if (named && canUseBot(player, named, named.config)) { this.healOwnerBinding(named, player); return named; }
+    const agent = this.all().find((agent) => (!agent.ownerId || agent.ownerId === player.id || agent.ownerName === player.name) && canUseBot(player, agent, agent.config)) || null;
+    if (agent) this.healOwnerBinding(agent, player);
+    return agent;
+  }
+  /**
+   * Runtime entity ids are re-assigned every session, so a bot saved with an
+   * owner id from the previous session no longer matches its returning owner.
+   * When the owner name matches, trust it and rewrite the stored id so the
+   * binding stays fresh instead of failing forever with "No bot is assigned".
+   */
+  healOwnerBinding(agent, player) {
+    if (!agent || !player || !agent.ownerName || agent.ownerName !== player.name) return;
+    if (agent.ownerId === player.id) return;
+    agent.ownerId = player.id;
+    try { agent.entity.setDynamicProperty("aibot:owner_id", player.id); } catch { /* entity invalid */ }
   }
   /**
    * A dead or unloaded bot must never permanently block its own name. If the
@@ -440,6 +467,26 @@ export class BotController {
     if (!existing) return null;
     if (isValidEntity(existing.entity)) return existing;
     this.agents.delete(existing.entity?.id);
+    return null;
+  }
+  /**
+   * Scan the actual world (not just this controller's registry) for a live
+   * companion with this name. When two copies of the pack are active at once,
+   * the other copy's bot exists in the dimension but is unknown to this
+   * controller — and without this check each copy would spawn its own bot
+   * with the same name during auto-summon. Also covers a missed entityLoad.
+   */
+  findLiveEntityByName(name) {
+    const wanted = String(name || "").toLowerCase();
+    if (!wanted) return null;
+    for (const dimensionId of DIMENSIONS) {
+      try {
+        for (const entity of world.getDimension(dimensionId).getEntities({ type: BOT_ENTITY_ID })) {
+          const stored = String(entity.getDynamicProperty("aibot:name") || entity.nameTag || "").split("\n")[0];
+          if (stored.toLowerCase() === wanted && isValidEntity(entity)) return entity;
+        }
+      } catch { /* dimension unavailable */ }
+    }
     return null;
   }
   spawnLocation(player) {
@@ -455,13 +502,20 @@ export class BotController {
   }
   create(player, requestedName = "Steve") {
     const name = String(requestedName || "Steve").replace(/[^A-Za-z0-9 _-]/g, "").trim().slice(0, 24) || "Steve";
-    const existing = this.reclaimDeadName(name);
+    const existing = this.reclaimDeadName(name) || this.register(this.findLiveEntityByName(name));
     if (existing) {
+      // The player's own bot still exists (typical after rejoining a world):
+      // hand it back instead of scolding them with "already exists" — that
+      // message is what made rejoining players think the mod was broken.
+      if (existing.ownerId === player.id || (existing.ownerName && existing.ownerName === player.name)) {
+        player.sendMessage(`§a✔ ${name}§a is already at your side.§r Use §e${commandHint(this, "status")}§r, §e${commandHint(this, "follow")}§r, or ${talkHint(this, name)}.`);
+        return { agent: existing, created: false, reclaimed: true };
+      }
       return {
         agent: existing, created: false,
-        reason: existing.ownerName && existing.ownerName !== player.name
+        reason: existing.ownerName
           ? `${name} already exists and belongs to ${existing.ownerName}. Choose another name.`
-          : `${name} already exists. Use !aibot status ${name}, or !aibot remove ${name} to despawn and recreate.`
+          : `${name} already exists. Use §e${commandHint(this, `status ${name}`)}§r, or §e${commandHint(this, `remove ${name}`)}§r to despawn and recreate.`
       };
     }
     const dimension = player.dimension || world.getDimension(player.dimensionId ?? "overworld");
@@ -501,7 +555,7 @@ export class BotController {
     agent.runtime.home = player.location;
     setBotStatus(entity, BotState.IDLE);
     agent.persist(true);
-    player.sendMessage(`§a✔ Created ${name}§a.§r Use §e!aibot panel§r, §e!aibot follow§r, or say "§f${name}§e, follow me§e".`);
+    player.sendMessage(`§a✔ Created ${name}§a.§r Use §e${commandHint(this, "panel")}§r, §e${commandHint(this, "follow")}§r, or ${talkHint(this, name)}.`);
     return { agent, created: true };
   }
   removeByName(player, requestedName = "") {
@@ -511,7 +565,7 @@ export class BotController {
     const name = agent.name;
     try { if (isValidEntity(agent.entity)) agent.entity.remove(); } catch { /* already gone */ }
     this.agents.delete(agent.entity?.id);
-    return `§aRemoved ${name}.§r Its tasks and memory are gone; use §e!aibot create ${name}§r to start fresh.`;
+    return `§aRemoved ${name}.§r Its tasks and memory are gone; use §e${commandHint(this, `create ${name}`)}§r to start fresh.`;
   }
   infoText() {
     const d = this.diagnostics;
@@ -523,6 +577,7 @@ export class BotController {
       `Script: v${d.scriptVersion} (loaded — this message proves the script engine is running)`,
       `Chat event: ${d.chatSource}`,
       `Slash commands: ${d.slashCommands}`,
+      `Duplicate packs: ${d.duplicate}`,
       `Scriptevent bridge: ${d.scriptEvent}`,
       `Compass menu event: ${d.itemUseSource || "not reported"}`,
       `Tick loop: ${d.engineStarted ? "running" : "NOT RUNNING"}${d.tickJob ? "" : " (interval job missing)"}`,
@@ -546,11 +601,11 @@ export class BotController {
     this.agents.delete(entity.id);
   }
   names() { return this.all().map((agent) => agent.name); }
-  status(player, name) { const agent = this.forPlayer(player, name); return agent?.statusText() || "No bot is assigned to you."; }
-  inventory(player, name) { const agent = this.forPlayer(player, name); return agent?.inventoryText() || "No bot is assigned to you."; }
+  status(player, name) { const agent = this.forPlayer(player, name); return agent?.statusText() || noBotMessage(this); }
+  inventory(player, name) { const agent = this.forPlayer(player, name); return agent?.inventoryText() || noBotMessage(this); }
   runNamedCommand(player, name, args) {
     const agent = this.forPlayer(player);
-    if (!agent) return "No bot is assigned to you.";
+    if (!agent) return noBotMessage(this);
     if (!canUseBot(player, agent, agent.config)) return "Permission denied.";
     const checked = validateNamedCommand(name, args, agent.config);
     if (!checked.ok) return checked.reason;

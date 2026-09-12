@@ -12,7 +12,7 @@ registered during the script startup event with `permissionLevel: Any` and
 | Command | Effect |
 |---|---|
 | `/aibot:help` | Show help |
-| `/aibot:create Steve` | Spawn an owner-bound bot |
+| `/aibot:create Steve` | Spawn an owner-bound bot. If your bot with that name already exists (e.g. after a world reload) it is handed back to you instead of erroring — bots are never duplicated |
 | `/aibot:panel` | Open control UI |
 | `/aibot:list` | List loaded bots |
 | `/aibot:status` | Grounded status, task, health and inventory occupancy |
@@ -57,6 +57,10 @@ The UI exposes provider, model, personality, combat mode, command and debug sett
 - If nothing replies at all, the script module is not loading. Run the troubleshooting table in
   `README.md`; the usual cause is a stale imported pack or a game version older than the
   `@minecraft/server` level the manifest declares.
+- Seeing **two** `[AI Bot …] Script loaded` banners with different versions means two copies
+  of the behavior pack are active on the world — deactivate the older one in
+  *Edit World → Behavior Packs*, then reload the world. Since v1.3.1 the pack detects a
+  second running copy (v1.3.1+) itself and prints a red `⚠ Two copies…` warning.
 
 ### Without chat (the default on current builds)
 

@@ -49,8 +49,11 @@ https://github.com/ayushghbk-afk/mod-for-minecraft-/releases/download/bedrock-mo
 The workflow also uploads a **bedrock-mobile-modpack** artifact on the Actions run. See `INSTALL_MOBILE.md` for Android and iOS steps.
 
 > **Already imported an older copy?** Minecraft keeps using the version of a pack that the
-> world was saved with. After a fix you must download the new `.mcaddon`, import it again,
-> then open the world settings and remove + re-add both packs (or create a fresh world).
+> world was saved with — and an old import with different manifest UUIDs can stay active
+> **alongside** the new one (you will see two `[AI Bot …] Script loaded` banners with
+> different versions). After a fix: import the new `.mcaddon`, open *Edit World → Behavior
+> Packs*, **deactivate every older "Autonomous AI Bot" entry so exactly one remains**, then
+> remove + re-add the remaining pack (or create a fresh world).
 
 ## Install on Android / Bedrock
 
@@ -169,11 +172,13 @@ Work through this in order; the first line that is false is your cause.
 | Check | Fix |
 |---|---|
 | You see the cyan **`[AI Bot v…] Script loaded`** message when you join the world | If you do not, the script module is not loading: re-import the newest `.mcaddon` and re-activate **both** packs on the world. |
+| You see the banner **only once** | Two banners with different versions (e.g. `v1.2.0` and `v1.3.x` at the same time) mean **two copies of the behavior pack are active on that world** — every command is handled twice by two separate scripts and you get doubled messages, two bots with the same name, and `No bot is assigned to you` from the copy that did not create your bot. Fix: *Edit World → Behavior Packs* and **deactivate the older "Autonomous AI Bot" pack**, then save and reload the world. Since v1.3.1 the pack also detects a second running copy automatically (both copies must be v1.3.1+) and prints a red `⚠ Two copies…` warning with these steps. |
+| You see **`No bot is assigned to you`** although a bot exists | Since v1.3.1 this heals itself: the bot's stored owner id is a runtime id that changes every session, so old builds lost track of the owner after a world reload. Update to v1.3.1+ and use `/aibot:status` — the bot is re-bound to you by name automatically. If it still fails, run `/aibot:info` and check the `Duplicate packs:` line. |
 | The join message says **`chat: unavailable`** | That is normal on Bedrock 26.x: Mojang removed chat script events from the stable API, so `!aibot …` typed in chat **cannot** work. Use `/aibot:create Steve` (custom slash command), the **compass** menu, or `/scriptevent aibot:cmd create Steve` with cheats on. |
 | `Settings → Profile` shows Bedrock **1.26.0+** | Update Minecraft. The pack cannot load on an older engine. |
 | Both **Autonomous AI Bot - Behavior** and **- Resources** are ACTIVE on that world | Activate them in *Edit World*, not just in global storage. |
 | You typed `/aibot:create` (namespaced, with the colon) | A bare `/aibot` has never existed as a slash command; every command is `/aibot:<action>`, e.g. `/aibot:create Steve`, `/aibot:help`. |
-| `/aibot:info` replies | If it replies but `create` fails, it prints the real spawn error (usually the behaviour pack is applied but the entity type is not registered — re-add the pack to the world). |
+| `/aibot:info` replies | If it replies but `create` fails, it prints the real spawn error (usually the behaviour pack is applied but the entity type is not registered — re-add the pack to the world). `/aibot:info` also prints the `Duplicate packs:` line — anything other than `none detected` means deactivate the older copy as above. |
 | Chat is not muted/filtered and you are not on a server that strips `!` messages | Ask the server owner, or use the compass UI instead of chat. |
 
 Verbose content log (Windows Bedrock: `Settings → Creator → Enable Content Log`, or launch

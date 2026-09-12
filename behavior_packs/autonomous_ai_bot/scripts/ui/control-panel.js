@@ -1,10 +1,18 @@
 import { ActionFormData, ModalFormData } from "@minecraft/server-ui";
+import { commandHint } from "../core/hints.js";
 
 function botFor(controller, player) { return controller.forPlayer(player); }
 
 export async function showControlPanel(player, controller) {
+  // forPlayer() re-scans the world before giving up, so reaching this branch
+  // with no agent really means "this player controls no bot". Sending them a
+  // chat command was a dead end on builds without chat events — the create
+  // form works everywhere, no commands or cheats needed.
   const agent = botFor(controller, player);
-  if (!agent) { player.sendMessage("§eNo bot is assigned to you. Use §f!aibot create Steve§e."); return; }
+  if (!agent) {
+    player.sendMessage(`§eNo bot is assigned to you yet.§r Create one below, or use §f${commandHint(controller, "create Steve")}§r.`);
+    return showCreateBot(player, controller);
+  }
   const form = new ActionFormData()
     .title(`AI BOT — ${agent.name}`)
     .body(agent.statusText())

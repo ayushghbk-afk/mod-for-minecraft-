@@ -132,3 +132,57 @@ test("the join message explains what actually works instead of dead chat command
   assert.match(text, /Auto-summoned AIBot/);
   assert.ok(globalThis.__aibotController.byName("AIBot"));
 });
+
+test("with no bot assigned, the reply recommends a command this build can run", () => {
+  const registry = makeRegistry();
+  bedrock.fireStartup(registry);
+  const player = bedrock.addPlayer("Lonely");
+
+  assert.equal(registry.registrations.get("aibot:follow").callback({ sourceEntity: player }).status, bedrock.CustomCommandStatus.Success);
+  bedrock.advance(4);
+
+  const text = player.sentMessages.join("\n");
+  assert.match(text, /No bot is assigned to you/);
+  assert.match(text, /\/aibot:create Steve/);
+  assert.doesNotMatch(text, /!aibot create/, "a build without chat events must never point the player back to chat");
+});
+
+test("a returning owner keeps their bot after the runtime player id changes", () => {
+  const registry = makeRegistry();
+  bedrock.fireStartup(registry);
+
+  // Session 1: the bot is created and bound to the player's runtime id.
+  const first = bedrock.addPlayer("Returning");
+  registry.registrations.get("aibot:create").callback({ sourceEntity: first }, "Loyal");
+  bedrock.advance(4);
+
+  // Session 2: same player, brand-new runtime id (Bedrock re-assigns entity
+  // ids every session; the bot still stores the previous session's id).
+  first.removed = true;
+  const second = bedrock.addPlayer("Returning");
+  assert.notEqual(second.id, first.id);
+
+  registry.registrations.get("aibot:follow").callback({ sourceEntity: second });
+  bedrock.advance(4);
+
+  const text = second.sentMessages.join("\n");
+  assert.match(text, /Following you/, `the owner must still control their bot, got: ${JSON.stringify(text)}`);
+  assert.doesNotMatch(text, /No bot is assigned/);
+  const bot = globalThis.__aibotController.byName("Loyal");
+  assert.equal(bot.entity.getDynamicProperty("aibot:owner_id"), second.id, "the stale owner id must be healed");
+});
+
+test("tapping a bot with none assigned opens the create form, not a dead-end chat command", async () => {
+  const ui = await import("#stub/bedrock-ui");
+  ui.resetShownForms();
+  const player = bedrock.addPlayer("Tapper");
+  bedrock.world.afterEvents.playerInteractWithEntity.fire({ player, target: { typeId: "aibot:companion" } });
+  bedrock.advance(2);
+
+  const text = player.sentMessages.join("\n");
+  assert.match(text, /No bot is assigned to you yet/);
+  assert.match(text, /\/aibot:create/);
+  assert.doesNotMatch(text, /!aibot create/);
+  const modal = ui.shownForms.filter((form) => form.kind === "modal").pop();
+  assert.equal(modal?.titleText, "Create AI Bot", "the create dialog must actually open");
+});
