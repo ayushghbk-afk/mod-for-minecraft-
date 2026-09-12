@@ -83,7 +83,8 @@ export function parseBotCommand(message) {
   const match = text.match(COMMAND_PREFIX);
   if (!match) return null;
   const rest = text.slice(match[0].length).trim();
+  if (!rest) return { command: "help", args: [] }; // just "!aibot" should show help, not be ignored
   const parts = rest.match(/^([^\s]+)(?:\s+(.+))?$/);
-  if (!parts) return null;
+  if (!parts) return { command: "help", args: [] };
   return { command: parts[1].toLowerCase(), args: (parts[2] || "").trim().split(/\s+/).filter(Boolean) };
 }
