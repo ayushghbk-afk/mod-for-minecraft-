@@ -71,41 +71,49 @@ Do not put API keys in either pack or in a public world template.
 
 ## Spawn and control
 
-Preferred owner-aware spawn:
+Preferred owner-aware spawn (works on every current build, **no cheats needed**):
 
 ```text
-!aibot create Steve
+/aibot:create Steve
 ```
 
-The creating player becomes the owner. Exact controls:
+This is a real custom slash command: type `/aibot:create` in the command line exactly like
+`/gamemode` or `/summon`, and pick it from autocomplete. The creating player becomes the owner.
+
+If your game build still has chat events (the join message says `chat: ok`), the same command
+also works typed in plain chat as `!aibot create Steve`. On Bedrock 26.x builds the join
+message says `chat: unavailable` — chat commands are impossible there (Mojang removed the
+`chatSend` script events from the stable API), which is exactly why the `/aibot:*` slash
+commands exist. Exact controls:
 
 ```text
-!aibot help
-!aibot panel
-!aibot status
-!aibot inventory
-!aibot follow
-!aibot stop
-!aibot protect
-!aibot return
-!aibot cancel
-!aibot resume
-!aibot list
-!aibot remove <name>
-!aibot info
+/aibot:help
+/aibot:panel
+/aibot:status
+/aibot:inventory
+/aibot:follow
+/aibot:stop
+/aibot:protect
+/aibot:return
+/aibot:cancel
+/aibot:resume
+/aibot:list
+/aibot:remove <name>
+/aibot:info
 ```
 
-`!aibot info` prints script version, which chat signal the pack bound to, whether the tick
-loop is running, how many `aibot:companion` entities exist per dimension, and the last spawn
-error. It is the first thing to run when the bot "does nothing".
+`/aibot:info` prints script version, which chat signal the pack bound to, how many slash
+commands registered, whether the tick loop is running, how many `aibot:companion` entities
+exist per dimension, and the last spawn error. It is the first thing to run when the bot
+"does nothing".
 
-Forgiving input: `aibot create Steve`, `!bot create Steve` and `!aibot: create Steve` are all
-accepted. A leading `/` is **not** — Bedrock intercepts `/…` as a game command and answers
-"Unknown command" before any script sees the text, so always type these in plain chat.
+Forgiving input: when chat works, `aibot create Steve`, `!bot create Steve` and
+`!aibot: create Steve` are all accepted as chat messages.
 
-No-chat alternative (useful on mobile): hold a **compass** and use it to open the create form,
-or the control panel if you already own a bot. Interacting with the bot itself also opens the
-panel.
+No-chat alternatives (the default on current builds): hold a **compass** and use it to open
+the create form, or the control panel if you already own a bot. Interacting with the bot
+itself also opens the panel. On worlds with cheats enabled,
+`/scriptevent aibot:cmd create Steve` reaches the same handler.
 
 Natural-language examples (the bot name is required):
 
@@ -154,17 +162,18 @@ The default configuration uses the supplied Cloudflare Worker at `https://groq-p
 - Permanently denied named commands include `op`, `deop`, `stop`, `ban`, `kill` and `give`.
 - API keys are not accepted by the in-world settings form and are never written to dynamic properties.
 
-## Troubleshooting "!aibot create Steve does nothing"
+## Troubleshooting "the command does nothing / no bot spawns"
 
 Work through this in order; the first line that is false is your cause.
 
 | Check | Fix |
 |---|---|
 | You see the cyan **`[AI Bot v…] Script loaded`** message when you join the world | If you do not, the script module is not loading: re-import the newest `.mcaddon` and re-activate **both** packs on the world. |
+| The join message says **`chat: unavailable`** | That is normal on Bedrock 26.x: Mojang removed chat script events from the stable API, so `!aibot …` typed in chat **cannot** work. Use `/aibot:create Steve` (custom slash command), the **compass** menu, or `/scriptevent aibot:cmd create Steve` with cheats on. |
 | `Settings → Profile` shows Bedrock **1.26.0+** | Update Minecraft. The pack cannot load on an older engine. |
 | Both **Autonomous AI Bot - Behavior** and **- Resources** are ACTIVE on that world | Activate them in *Edit World*, not just in global storage. |
-| You typed it in **chat**, with `!`, not as `/aibot …` | `/aibot` is answered by the game, never by this pack. |
-| `!aibot info` replies | If it replies but `create` fails, it prints the real spawn error (usually the behaviour pack is applied but the entity type is not registered — re-add the pack to the world). |
+| You typed `/aibot:create` (namespaced, with the colon) | A bare `/aibot` has never existed as a slash command; every command is `/aibot:<action>`, e.g. `/aibot:create Steve`, `/aibot:help`. |
+| `/aibot:info` replies | If it replies but `create` fails, it prints the real spawn error (usually the behaviour pack is applied but the entity type is not registered — re-add the pack to the world). |
 | Chat is not muted/filtered and you are not on a server that strips `!` messages | Ask the server owner, or use the compass UI instead of chat. |
 
 Verbose content log (Windows Bedrock: `Settings → Creator → Enable Content Log`, or launch

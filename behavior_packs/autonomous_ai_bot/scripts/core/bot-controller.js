@@ -404,7 +404,11 @@ export class BotController {
     this.agents = new Map();
     this.tickCount = 0;
     /** Filled in by main.js so `!aibot info` can explain a silent failure. */
-    this.diagnostics = { scriptVersion: "unknown", chatSource: "unbound", itemUseSource: "unbound", engineStarted: false, tickJob: false, spawnFailures: 0, lastSpawnError: "" };
+    this.diagnostics = {
+      scriptVersion: "unknown", chatSource: "unbound", itemUseSource: "unbound",
+      slashCommands: "unknown (startup event has not fired yet)", scriptEvent: "unbound",
+      engineStarted: false, tickJob: false, spawnFailures: 0, lastSpawnError: ""
+    };
   }
   register(entity) {
     if (!entity || entity.typeId !== BOT_ENTITY_ID) return null;
@@ -518,6 +522,8 @@ export class BotController {
       `§bAI Bot diagnostics§r`,
       `Script: v${d.scriptVersion} (loaded — this message proves the script engine is running)`,
       `Chat event: ${d.chatSource}`,
+      `Slash commands: ${d.slashCommands}`,
+      `Scriptevent bridge: ${d.scriptEvent}`,
       `Compass menu event: ${d.itemUseSource || "not reported"}`,
       `Tick loop: ${d.engineStarted ? "running" : "NOT RUNNING"}${d.tickJob ? "" : " (interval job missing)"}`,
       `Entities in world: ${dimensions}`,

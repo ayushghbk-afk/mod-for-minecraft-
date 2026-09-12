@@ -4,7 +4,7 @@ The add-on uses entity dynamic properties, not a file-reading API. Each bot has 
 
 ## Settings
 
-The control panel is available with `!aibot panel` or by interacting with the bot.
+The control panel is available with the `/aibot:panel` slash command (or `!aibot panel` in chat on builds with chat events), by holding a compass, or by interacting with the bot.
 
 | Setting | Default | Values / notes |
 |---|---|---|

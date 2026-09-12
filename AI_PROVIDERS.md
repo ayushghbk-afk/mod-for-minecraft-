@@ -46,7 +46,7 @@ The default configuration now points at the supplied Cloudflare Worker:
 https://groq-proxy.mr-hackerdon808.workers.dev/
 ```
 
-It is configured as an OpenAI-compatible provider with the default model `llama-3.3-70b-versatile`. Change the model in `!aibot panel` if the Worker expects a different model. The Worker must accept a POST body containing `model`, `messages` and `response_format` and return an OpenAI-compatible response. No API key is embedded in this repository.
+It is configured as an OpenAI-compatible provider with the default model `llama-3.3-70b-versatile`. Change the model in `/aibot:panel` if the Worker expects a different model. The Worker must accept a POST body containing `model`, `messages` and `response_format` and return an OpenAI-compatible response. No API key is embedded in this repository.
 
 The proxy at `proxy/server.mjs` stores the upstream key in environment variables and exposes only a small `/v1/plan` route:
 

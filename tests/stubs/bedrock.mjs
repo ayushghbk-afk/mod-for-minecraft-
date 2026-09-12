@@ -24,6 +24,11 @@ export const EquipmentSlot = Object.freeze({
   Head: "Head", Chest: "Chest", Legs: "Legs", Feet: "Feet", Mainhand: "Mainhand", Offhand: "Offhand"
 });
 
+/** Stable enums main.js imports for Custom Command registration. */
+export const CommandPermissionLevel = Object.freeze({ Any: 0, GameDirectors: 1, Admin: 2, Host: 3, Owner: 4 });
+export const CustomCommandParamType = Object.freeze({ Boolean: 0, Integer: 1, Float: 2, String: 3, Enum: 4, Player: 5 });
+export const CustomCommandStatus = Object.freeze({ Success: 0, Failure: 1 });
+
 class Container {
   constructor(size) { this.size = size; this.slots = new Array(size).fill(undefined); }
   get emptySlotsCount() { return this.slots.filter((slot) => !slot).length; }
@@ -172,11 +177,16 @@ class ScriptWorld {
 
 export const world = new ScriptWorld();
 
+const systemBeforeEvents = { startup: new Signal() };
+const systemAfterEvents = { scriptEventReceive: new Signal() };
+
 const jobs = [];
 let currentTick = 0;
 
 export const system = {
   get currentTick() { return currentTick; },
+  beforeEvents: systemBeforeEvents,
+  afterEvents: systemAfterEvents,
   run(callback) { jobs.push({ runAt: currentTick, callback }); return jobs.length; },
   runTimeout(callback, ticks = 1) { jobs.push({ runAt: currentTick + ticks, callback }); return jobs.length; },
   runInterval(callback, ticks = 1) { jobs.push({ runAt: currentTick, every: Math.max(1, ticks), callback }); return jobs.length; },
@@ -224,11 +234,38 @@ export function resetWorld() {
   world.dimensions.set("overworld", new Dimension("overworld"));
   world.dimensions.set("nether", new Dimension("nether"));
   world.dimensions.set("the_end", new Dimension("the_end"));
-  for (const group of [world.beforeEvents, world.afterEvents]) {
+  for (const group of [world.beforeEvents, world.afterEvents, systemBeforeEvents, systemAfterEvents]) {
     for (const signal of Object.values(group)) signal.handlers.length = 0;
   }
   jobs.length = 0;
   currentTick = 0;
+}
+
+let savedChatBefore = null;
+let savedChatAfter = null;
+
+/**
+ * Pretend the game build has (or has not) removed the chatSend events, exactly
+ * like stable @minecraft/server 2.x did. Detaching keeps the original signal
+ * objects so re-enabling restores the script's subscriptions untouched.
+ */
+export function setChatAvailable(enabled) {
+  if (!enabled) {
+    savedChatBefore = world.beforeEvents.chatSend ?? null;
+    savedChatAfter = world.afterEvents.chatSend ?? null;
+    delete world.beforeEvents.chatSend;
+    delete world.afterEvents.chatSend;
+  } else {
+    if (savedChatBefore) world.beforeEvents.chatSend = savedChatBefore;
+    else world.beforeEvents.chatSend ??= new Signal();
+    if (savedChatAfter) world.afterEvents.chatSend = savedChatAfter;
+    else world.afterEvents.chatSend ??= new Signal();
+  }
+}
+
+/** Fire the startup event the way the game does, with a scriptable registry. */
+export function fireStartup(customCommandRegistry) {
+  systemBeforeEvents.startup.fire({ customCommandRegistry });
 }
 
 /**

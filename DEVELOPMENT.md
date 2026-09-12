@@ -47,8 +47,8 @@ command path testable outside Bedrock, so it asserts that:
   answers exactly once (a double-bound chat signal would spawn two bots);
 - tolerant prefixes (`aibot …`, `!bot …`, `!aibot: …`, upper case) still parse, while ordinary
   sentences such as `bot follow me please` are ignored;
-- `!aibot info` reports the bound chat signal, tick loop and entity counts;
-- `!aibot remove` frees a name for re-creation;
+- `/aibot:info` reports the bound chat signal, slash-command registration, tick loop and entity counts;
+- `/aibot:remove` frees a name for re-creation;
 - a failed `spawnEntity` produces an actionable error instead of silence.
 
 The stub is test-only and lives outside `behavior_packs/`, so it is never packaged into the
@@ -67,14 +67,26 @@ When you use a newer API, raise the dependency deliberately, gate the call behin
 accessor (the codebase already does this for chat signals via `safeSubscribe`), and document the
 minimum game version.
 
+### Chat events do not exist on stable 2.x — slash commands are the interface
+
+Stable `@minecraft/server` 2.x (Bedrock 26.x) ships **no** `world.beforeEvents.chatSend` /
+`world.afterEvents.chatSend`; they were removed in 2.0.0 and only exist in beta builds again
+since ~2.12.0-beta. The pack therefore registers namespaced **custom slash commands**
+(`/aibot:create`, `/aibot:help`, …) in `system.beforeEvents.startup` and a `/scriptevent aibot:cmd …`
+bridge. When touching command code remember the registry's hard rules: names must be
+namespaced, parameter types must be `CustomCommandParamType` values, and `cheatsRequired: false`
+is what keeps the commands usable without cheats. Tests in `tests/slash-command.test.mjs`
+simulate a chat-less build and fail if any of those rules regresses.
+
 ## Live Bedrock checklist
 
 Run in a disposable Bedrock 1.26.0+ world after importing both packs:
 
-0. Confirm the cyan `[AI Bot v…] Script loaded` join message and that `!aibot info` replies;
-   without those, nothing else can work.
+0. Confirm the cyan `[AI Bot v…] Script loaded` join message and that `/aibot:info` replies;
+   without those, nothing else can work. Verify the message's `chat:` note matches reality and
+   that `/aibot:create Steve` spawns a bot even when chat is unavailable.
 1. Create, despawn and recreate a bot; verify model, name tag, health and collision.
-2. Run `!aibot follow`, walk over uneven terrain, run `!aibot stop`, and check bounded movement/stuck recovery.
+2. Run `/aibot:follow`, walk over uneven terrain, run `/aibot:stop`, and check bounded movement/stuck recovery.
 3. Place oak logs and dropped items nearby. Run `Steve, get me 2 oak logs`; verify the block actually changes, item entities are picked up, inventory count increases, task reaches `2/2`, and the bot returns.
 4. Spawn a zombie near the bot during collection. Verify `PAUSED`, attack, health/death verification and `RESUMING TASK`.
 5. Fill all 36 inventory slots. Verify collection fails without claiming progress and the item remains in the world; test chest store/withdraw separately.

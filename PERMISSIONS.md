@@ -10,7 +10,7 @@
 
 ## Named command allowlist
 
-When `!aibot allow on` is explicitly enabled by the owner, only these named commands are available through `!aibot command`:
+When `!aibot allow on` is explicitly enabled by the owner (chat builds only; it is a chat-only command), only these named commands are available through `!aibot command`:
 
 - `time day`
 - `time night`
