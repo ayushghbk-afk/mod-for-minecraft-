@@ -12,6 +12,7 @@ import { providerFor } from "./ai-provider.js";
 import { StuckDetector } from "./navigation.js";
 import { validateNamedCommand, canUseBot } from "./permissions.js";
 
+const BOT_ENTITY_ID = "aibot:companion";
 const DIMENSIONS = ["overworld", "nether", "the_end"];
 const DROP_FOR_BLOCK = Object.freeze({
   "minecraft:iron_ore": "minecraft:raw_iron", "minecraft:gold_ore": "minecraft:raw_gold",
@@ -399,9 +400,14 @@ class BotAgent {
 }
 
 export class BotController {
-  constructor() { this.agents = new Map(); this.tickCount = 0; }
+  constructor() {
+    this.agents = new Map();
+    this.tickCount = 0;
+    /** Filled in by main.js so `!aibot info` can explain a silent failure. */
+    this.diagnostics = { scriptVersion: "unknown", chatSource: "unbound", itemUseSource: "unbound", engineStarted: false, tickJob: false, spawnFailures: 0, lastSpawnError: "" };
+  }
   register(entity) {
-    if (!entity || entity.typeId !== "aibot:companion") return null;
+    if (!entity || entity.typeId !== BOT_ENTITY_ID) return null;
     if (this.agents.has(entity.id)) return this.agents.get(entity.id);
     const agent = new BotAgent(this, entity);
     this.agents.set(entity.id, agent);
@@ -409,7 +415,7 @@ export class BotController {
   }
   restore() {
     for (const dimensionId of DIMENSIONS) {
-      try { for (const entity of world.getDimension(dimensionId).getEntities({ type: "aibot:companion" })) this.register(entity); } catch { /* dimension unavailable */ }
+      try { for (const entity of world.getDimension(dimensionId).getEntities({ type: BOT_ENTITY_ID })) this.register(entity); } catch { /* dimension unavailable */ }
     }
   }
   remove(id) { this.agents.delete(id); }
@@ -420,23 +426,104 @@ export class BotController {
     if (named && canUseBot(player, named, named.config)) return named;
     return this.all().find((agent) => (!agent.ownerId || agent.ownerId === player.id || agent.ownerName === player.name) && canUseBot(player, agent, agent.config)) || null;
   }
+  /**
+   * A dead or unloaded bot must never permanently block its own name. If the
+   * stored entity is gone, the stale registration is dropped and the create
+   * continues instead of returning "already exists".
+   */
+  reclaimDeadName(name) {
+    const existing = this.byName(name);
+    if (!existing) return null;
+    if (isValidEntity(existing.entity)) return existing;
+    this.agents.delete(existing.entity?.id);
+    return null;
+  }
+  spawnLocation(player) {
+    const base = player.location;
+    return [
+      { x: base.x + 1, y: base.y, z: base.z + 1 },
+      { x: base.x - 1, y: base.y, z: base.z - 1 },
+      { x: base.x + 1, y: base.y, z: base.z - 1 },
+      { x: base.x - 1, y: base.y, z: base.z + 1 },
+      { x: base.x, y: base.y, z: base.z },
+      { x: base.x, y: base.y + 1, z: base.z }
+    ];
+  }
   create(player, requestedName = "Steve") {
     const name = String(requestedName || "Steve").replace(/[^A-Za-z0-9 _-]/g, "").trim().slice(0, 24) || "Steve";
-    if (this.byName(name)) return { agent: this.byName(name), created: false };
-    const entity = player.dimension.spawnEntity("aibot:companion", { x: player.location.x + 1, y: player.location.y, z: player.location.z + 1 });
-    entity.setDynamicProperty("aibot:name", name);
-    entity.setDynamicProperty("aibot:owner_id", player.id);
-    entity.setDynamicProperty("aibot:owner_name", player.name);
-    entity.setDynamicProperty("aibot:home", JSON.stringify(positionArray(player.location)));
-    entity.nameTag = name;
+    const existing = this.reclaimDeadName(name);
+    if (existing) {
+      return {
+        agent: existing, created: false,
+        reason: existing.ownerName && existing.ownerName !== player.name
+          ? `${name} already exists and belongs to ${existing.ownerName}. Choose another name.`
+          : `${name} already exists. Use !aibot status ${name}, or !aibot remove ${name} to despawn and recreate.`
+      };
+    }
+    const dimension = player.dimension || world.getDimension(player.dimensionId ?? "overworld");
+    let entity = null;
+    let lastError = "";
+    for (const candidate of this.spawnLocation(player)) {
+      try {
+        const spawned = dimension.spawnEntity(BOT_ENTITY_ID, candidate);
+        if (spawned) { entity = spawned; break; }
+        lastError = "spawnEntity returned nothing.";
+      } catch (error) {
+        lastError = String(error?.message || error).slice(0, 200);
+      }
+    }
+    if (!entity) {
+      this.diagnostics.spawnFailures += 1;
+      this.diagnostics.lastSpawnError = lastError;
+      return {
+        agent: null, created: false,
+        reason: `Could not spawn ${BOT_ENTITY_ID}. ${lastError ? `Game said: ${lastError}. ` : ""}`
+          + "This almost always means the AI Bot behavior pack is not active on this world, or the world was created before the pack was added."
+      };
+    }
+    try {
+      entity.setDynamicProperty("aibot:name", name);
+      entity.setDynamicProperty("aibot:owner_id", player.id);
+      entity.setDynamicProperty("aibot:owner_name", player.name);
+      entity.setDynamicProperty("aibot:home", JSON.stringify(positionArray(player.location)));
+      entity.nameTag = name;
+    } catch (error) {
+      return { agent: null, created: false, reason: `Bot spawned but metadata could not be written: ${String(error).slice(0, 140)}` };
+    }
     const agent = this.register(entity);
     agent.name = name;
     agent.ownerId = player.id;
     agent.ownerName = player.name;
     agent.runtime.home = player.location;
     setBotStatus(entity, BotState.IDLE);
-    player.sendMessage(`§aCreated ${name}.§r Use §e!aibot panel§r or say "${name}, follow me".`);
+    agent.persist(true);
+    player.sendMessage(`§a✔ Created ${name}§a.§r Use §e!aibot panel§r, §e!aibot follow§r, or say "§f${name}§e, follow me§e".`);
     return { agent, created: true };
+  }
+  removeByName(player, requestedName = "") {
+    const agent = requestedName ? this.byName(requestedName) : this.forPlayer(player);
+    if (!agent) return "No bot matched that name.";
+    if (!canUseBot(player, agent, agent.config)) return "Permission denied: that bot has a different owner.";
+    const name = agent.name;
+    try { if (isValidEntity(agent.entity)) agent.entity.remove(); } catch { /* already gone */ }
+    this.agents.delete(agent.entity?.id);
+    return `§aRemoved ${name}.§r Its tasks and memory are gone; use §e!aibot create ${name}§r to start fresh.`;
+  }
+  infoText() {
+    const d = this.diagnostics;
+    const bots = this.all().map((agent) => `  • ${agent.name} — ${readBotStatus(agent.entity).state}, owner ${agent.ownerName || "none"}, entity ${isValidEntity(agent.entity) ? "loaded" : "MISSING"}`).join("\n") || "  (none loaded)";
+    let dimensions = "unknown";
+    try { dimensions = DIMENSIONS.map((id) => `${id}:${world.getDimension(id).getEntities({ type: BOT_ENTITY_ID }).length}`).join(" "); } catch { /* dimension query unavailable */ }
+    return [
+      `§bAI Bot diagnostics§r`,
+      `Script: v${d.scriptVersion} (loaded — this message proves the script engine is running)`,
+      `Chat event: ${d.chatSource}`,
+      `Compass menu event: ${d.itemUseSource || "not reported"}`,
+      `Tick loop: ${d.engineStarted ? "running" : "NOT RUNNING"}${d.tickJob ? "" : " (interval job missing)"}`,
+      `Entities in world: ${dimensions}`,
+      `Registered bots: ${this.all().length}`, bots,
+      `Spawn failures: ${d.spawnFailures}${d.lastSpawnError ? ` — last: ${d.lastSpawnError}` : ""}`
+    ].join("\n");
   }
   tick() {
     this.tickCount += 1;

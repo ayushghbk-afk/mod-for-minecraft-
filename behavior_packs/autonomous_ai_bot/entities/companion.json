@@ -58,6 +58,19 @@
         "priority": 8,
         "speed_multiplier": 0.7
       },
+      "minecraft:interact": {
+        "interactions": [
+          {
+            "interact_text": "action.interact.aibot.panel",
+            "cooldown": 0.4,
+            "swing": true,
+            "on_interact": {
+              "filters": { "all_of": [ { "test": "is_family", "subject": "other", "value": "player" } ] },
+              "target": "self"
+            }
+          }
+        ]
+      },
       "minecraft:nameable": {},
       "minecraft:damage_sensor": {
         "triggers": [

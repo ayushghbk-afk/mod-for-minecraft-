@@ -58,8 +58,32 @@ export function parseIntent(message, botNames) {
   return { bot, type: "unknown" };
 }
 
+/**
+ * Accepted spellings, because a chat command that only works when typed
+ * perfectly is the most common "the mod is broken" report on mobile:
+ *   !aibot create Steve   (documented)
+ *   aibot create Steve    (missing prefix)
+ *   !bot create Steve     (short alias)
+ *   !ai create Steve      (short alias)
+ *   !aibot: create Steve  (namespace-style typo)
+ * A leading "/" is tolerated in the parser, but note that Bedrock intercepts
+ * slash messages as game commands before chat events fire, so "/aibot ..." is
+ * answered by the game with "Unknown command", never by this pack.
+ */
+const BARE_PREFIX = /^(?:aibot|ai[\s_-]?bot)\s*:?\s*/i;
+const BANGED_PREFIX = /^[!/#.~]\s*(?:aibot|ai[\s_-]?bot|ai|bot)\s*:?\s*/i;
+const COMMAND_PREFIX = new RegExp(`(?:${BARE_PREFIX.source}|${BANGED_PREFIX.source})`, "i");
+
+export function isCommandMessage(message) {
+  return COMMAND_PREFIX.test(String(message || "").trim());
+}
+
 export function parseBotCommand(message) {
-  const match = String(message || "").trim().match(/^!aibot\s+([^\s]+)(?:\s+(.+))?$/i);
+  const text = String(message || "").trim();
+  const match = text.match(COMMAND_PREFIX);
   if (!match) return null;
-  return { command: match[1].toLowerCase(), args: (match[2] || "").trim().split(/\s+/).filter(Boolean) };
+  const rest = text.slice(match[0].length).trim();
+  const parts = rest.match(/^([^\s]+)(?:\s+(.+))?$/);
+  if (!parts) return null;
+  return { command: parts[1].toLowerCase(), args: (parts[2] || "").trim().split(/\s+/).filter(Boolean) };
 }
