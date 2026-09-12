@@ -26,13 +26,13 @@ The exact bounded defaults are in `behavior_packs/autonomous_ai_bot/scripts/core
 
 For an installed world, use the panel. For a custom host integration, pass a sanitized object to `saveConfig` or configure the same fields in the integration layer. The schema deliberately drops `apiKey`; never add a key to a pack, manifest, world template or client UI.
 
-Example provider configuration (no secret):
+The default configuration is set to the supplied Cloudflare Worker without storing a key:
 
 ```json
 {
-  "provider": "custom",
-  "endpoint": "https://bot-proxy.example/v1/plan",
-  "model": "gpt-oss-120b",
+  "provider": "openai-compatible",
+  "endpoint": "https://groq-proxy.mr-hackerdon808.workers.dev/",
+  "model": "llama-3.3-70b-versatile",
   "personality": "friendly",
   "combatMode": "defend_owner",
   "commandsEnabled": false,

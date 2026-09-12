@@ -22,15 +22,18 @@ status.js / persistence / chat
 
 The AI decides a bounded plan. `ActionEngine` decides how an action is carried out, checks game state and returns `{ success, reason }`. A failed or missing provider never bypasses the engine.
 
-## Local tests
+## Local tests and automatic builds
 
 Run from the repository root:
 
 ```sh
 npm test
+npm run build
 node --check proxy/server.mjs
 for f in behavior_packs/autonomous_ai_bot/scripts/**/*.js behavior_packs/autonomous_ai_bot/scripts/*.js; do node --check "$f"; done
 ```
+
+GitHub Actions is defined in `.github/workflows/build-addon.yml`. Every push, pull request and manual dispatch runs tests, syntax validation and `npm run build`, then uploads the `.mcaddon` bundle and both `.mcpack` files as an artifact. Pushing a tag such as `v1.0.1` additionally creates a GitHub Release containing the generated add-on files.
 
 The Node tests cover action rejection, plan limits, JSON parsing, task progress/pause/resume/completion, bounded memory, intent parsing, key removal and provider response validation. Files importing `@minecraft/server` cannot be executed by Node because that module exists only inside Bedrock; use the live checklist below for those parts.
 

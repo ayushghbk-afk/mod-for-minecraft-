@@ -2,9 +2,9 @@ export const CONFIG_VERSION = 1;
 
 export const DEFAULT_CONFIG = Object.freeze({
   version: CONFIG_VERSION,
-  provider: "fallback",
-  endpoint: "",
-  model: "",
+  provider: "openai-compatible",
+  endpoint: "https://groq-proxy.mr-hackerdon808.workers.dev/",
+  model: "llama-3.3-70b-versatile",
   personality: "friendly",
   combatMode: "defend_owner",
   commandsEnabled: false,

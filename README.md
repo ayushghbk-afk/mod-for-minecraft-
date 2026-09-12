@@ -30,18 +30,18 @@ See the limitations section below before calling this production-ready for a par
 ## Install on Android / Bedrock
 
 1. Make a copy of the world.
-2. Zip the **contents** of `behavior_packs/autonomous_ai_bot` and rename the zip to `autonomous_ai_bot_behavior.mcpack`.
-3. Zip the **contents** of `resource_packs/autonomous_ai_bot` and rename the zip to `autonomous_ai_bot_resources.mcpack`.
-4. Open both files on Android, Windows or another Bedrock device and import them into Minecraft.
-5. Edit the world, activate both packs, and enable **Beta APIs / Script API experiments only if the target game build requires them**. The manifests target stable APIs; do not enable unrelated experiments.
-6. Enter the world and run the spawn command below.
+2. Run `npm run build`, then use `dist/autonomous_ai_bot.mcaddon` for the simplest install. The build also produces separate behavior/resource `.mcpack` files.
+3. Open the `.mcaddon` on Android, Windows or another Bedrock device and import it into Minecraft.
+4. Edit the world, activate both packs, and enable **Beta APIs / Script API experiments only if the target game build requires them**. The manifests target stable APIs; do not enable unrelated experiments.
+5. Enter the world and run the spawn command below.
 
 From the repository root, the equivalent desktop packaging commands are:
 
 ```sh
-(cd behavior_packs/autonomous_ai_bot && zip -r ../../autonomous_ai_bot_behavior.mcpack .)
-(cd resource_packs/autonomous_ai_bot && zip -r ../../autonomous_ai_bot_resources.mcpack .)
+npm run build
 ```
+
+This writes an importable `dist/autonomous_ai_bot.mcaddon` plus the separate packs to `dist/`. GitHub Actions runs the same build automatically on pushes, pull requests and manual dispatch. A tag such as `v1.0.1` also creates a GitHub Release containing the add-on and pack files.
 
 Do not put API keys in either pack or in a public world template.
 
@@ -104,7 +104,7 @@ The visible name tag and dynamic properties report actual engine state; an AI re
 
 ## Provider summary
 
-The add-on can use `fallback`, `mideafire`, `custom` or `openai-compatible` provider implementations. See `AI_PROVIDERS.md` for the secure proxy and request schema. Stable mobile Script API does not provide a generally available outbound HTTP API, so the pack intentionally falls back instead of pretending it can contact a provider. The included Node proxy keeps keys server-side and is suitable for a host bridge / supported dedicated-server integration.
+The default configuration uses the supplied Cloudflare Worker at `https://groq-proxy.mr-hackerdon808.workers.dev/` as an OpenAI-compatible endpoint with model `llama-3.3-70b-versatile`. The model can be changed in the panel. See `AI_PROVIDERS.md` for the request contract. Stable mobile Script API does not provide a generally available outbound HTTP API, so the pack intentionally falls back instead of pretending it can contact a provider. A supported host bridge / dedicated-server integration is still required for the add-on to make outbound requests.
 
 ## Security defaults
 
