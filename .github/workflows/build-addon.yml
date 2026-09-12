@@ -29,6 +29,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install zip
+        run: sudo apt-get update -y && sudo apt-get install -y zip
+
       - name: Run unit tests
         run: npm test
 
@@ -42,16 +45,131 @@ jobs:
       - name: Build Bedrock packs
         run: npm run build
 
-      - name: Upload Bedrock packs
+      - name: Upload Bedrock / mobile mod pack
         uses: actions/upload-artifact@v4
         with:
-          name: autonomous-ai-bot-${{ github.sha }}
+          name: bedrock-mobile-modpack
           path: |
             dist/*.mcpack
             dist/*.mcaddon
             dist/build-info.json
           if-no-files-found: error
           retention-days: 14
+
+  publish-mobile:
+    name: Publish Bedrock / mobile .mcpack
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged Bedrock packs
+        uses: actions/download-artifact@v4
+        with:
+          name: bedrock-mobile-modpack
+          path: dist
+
+      - name: Publish rolling mobile release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          test -f dist/AI-Bot-Bedrock-Mobile.mcaddon
+          test -f dist/AI-Bot-Behavior.mcpack
+          test -f dist/AI-Bot-Resources.mcpack
+          TAG="bedrock-mobile-latest"
+          NOTES="$(cat <<'EOF'
+          # Bedrock / mobile mod pack
+
+          Download **AI-Bot-Bedrock-Mobile.mcaddon** on Android, iOS or Windows Bedrock, open it with Minecraft, then activate both packs on the world.
+
+          Separate files:
+
+          - `AI-Bot-Behavior.mcpack`
+          - `AI-Bot-Resources.mcpack`
+
+          In-game: `!aibot create Steve` then `!aibot help`.
+          EOF
+          )"
+          if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              dist/AI-Bot-Bedrock-Mobile.mcaddon \
+              dist/AI-Bot-Behavior.mcpack \
+              dist/AI-Bot-Resources.mcpack \
+              dist/autonomous_ai_bot.mcaddon \
+              dist/autonomous_ai_bot_behavior.mcpack \
+              dist/autonomous_ai_bot_resources.mcpack \
+              dist/build-info.json \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+            gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --title "Bedrock / Mobile Mod Pack" --notes "$NOTES"
+          else
+            gh release create "$TAG" \
+              dist/AI-Bot-Bedrock-Mobile.mcaddon \
+              dist/AI-Bot-Behavior.mcpack \
+              dist/AI-Bot-Resources.mcpack \
+              dist/autonomous_ai_bot.mcaddon \
+              dist/autonomous_ai_bot_behavior.mcpack \
+              dist/autonomous_ai_bot_resources.mcpack \
+              dist/build-info.json \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Bedrock / Mobile Mod Pack" \
+              --notes "$NOTES" \
+              --prerelease
+          fi
+          echo "### Download" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [AI-Bot-Bedrock-Mobile.mcaddon](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/AI-Bot-Bedrock-Mobile.mcaddon)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [AI-Bot-Behavior.mcpack](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/AI-Bot-Behavior.mcpack)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [AI-Bot-Resources.mcpack](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/AI-Bot-Resources.mcpack)" >> "$GITHUB_STEP_SUMMARY"
+
+  comment-pr:
+    name: Comment pack download on PR
+    if: github.event_name == 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Comment artifact location
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- bedrock-mobile-modpack -->';
+            const body = `${marker}
+            ## Bedrock / mobile mod pack
+
+            This run packaged \`.mcaddon\` / \`.mcpack\` files for Minecraft Bedrock, Android and iOS.
+
+            1. Open the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+            2. Download the **bedrock-mobile-modpack** artifact.
+            3. On a phone, open **AI-Bot-Bedrock-Mobile.mcaddon** with Minecraft.
+
+            After merge/push, the same files are published at the \`bedrock-mobile-latest\` release.
+            `;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            const existing = comments.find((comment) => comment.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body
+              });
+            }
 
   release:
     name: Publish tagged release
@@ -64,7 +182,7 @@ jobs:
       - name: Download packaged Bedrock packs
         uses: actions/download-artifact@v4
         with:
-          name: autonomous-ai-bot-${{ github.sha }}
+          name: bedrock-mobile-modpack
           path: dist
 
       - name: Create GitHub release

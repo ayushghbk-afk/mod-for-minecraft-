@@ -27,21 +27,35 @@ The behavior pack contains:
 
 See the limitations section below before calling this production-ready for a particular world.
 
+## Download for Bedrock / mobile
+
+Every successful GitHub Actions run packages the mod pack and publishes:
+
+- `AI-Bot-Bedrock-Mobile.mcaddon` — one file for Android, iOS and Windows Bedrock
+- `AI-Bot-Behavior.mcpack` and `AI-Bot-Resources.mcpack` — separate packs
+
+Phone download (after the workflow has published):
+
+```text
+https://github.com/ayushghbk-afk/mod-for-minecraft-/releases/download/bedrock-mobile-latest/AI-Bot-Bedrock-Mobile.mcaddon
+```
+
+The workflow also uploads a **bedrock-mobile-modpack** artifact on the Actions run. See `INSTALL_MOBILE.md` for Android and iOS steps.
+
 ## Install on Android / Bedrock
 
 1. Make a copy of the world.
-2. Run `npm run build`, then use `dist/autonomous_ai_bot.mcaddon` for the simplest install. The build also produces separate behavior/resource `.mcpack` files.
-3. Open the `.mcaddon` on Android, Windows or another Bedrock device and import it into Minecraft.
-4. Edit the world, activate both packs, and enable **Beta APIs / Script API experiments only if the target game build requires them**. The manifests target stable APIs; do not enable unrelated experiments.
-5. Enter the world and run the spawn command below.
+2. Open `AI-Bot-Bedrock-Mobile.mcaddon` on the device and import it into Minecraft.
+3. Edit the world, activate both packs, and enable **Beta APIs / Script API experiments only if the target game build requires them**. The manifests target stable APIs; do not enable unrelated experiments.
+4. Enter the world and run the spawn command below.
 
-From the repository root, the equivalent desktop packaging commands are:
+From the repository root, local packaging is:
 
 ```sh
 npm run build
 ```
 
-This writes an importable `dist/autonomous_ai_bot.mcaddon` plus the separate packs to `dist/`. GitHub Actions runs the same build automatically on pushes, pull requests and manual dispatch. A tag such as `v1.0.1` also creates a GitHub Release containing the add-on and pack files.
+This writes `dist/AI-Bot-Bedrock-Mobile.mcaddon` plus the `.mcpack` files. GitHub Actions runs the same build on pushes, pull requests and manual dispatch, then **gives the `.mcpack` / `.mcaddon` files as artifacts and updates the `bedrock-mobile-latest` release**. A tag such as `v1.0.1` also creates a versioned GitHub Release.
 
 Do not put API keys in either pack or in a public world template.
 
