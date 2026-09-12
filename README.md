@@ -5,8 +5,14 @@ This repository contains a Bedrock add-on architecture for a player-like compani
 ## Target and compatibility
 
 - Bedrock / Pocket Edition **1.26.0 or newer** (the 2026 year-based version series).
-- `@minecraft/server` **2.9.0** stable.
-- `@minecraft/server-ui` **2.1.0** stable.
+- `@minecraft/server` **2.5.0** — the version that shipped with Bedrock 26.0, so the script
+  module also loads on 26.10 / 26.20 / 26.30 / 26.40+.
+- `@minecraft/server-ui` **2.0.0** stable.
+
+> **Why this matters:** if a manifest declares a `@minecraft/server` version newer than the
+> game provides, Bedrock refuses to load the script module and does it **silently** — no
+> error in chat, no bot, and `!aibot create Steve` appears to do nothing. This pack now
+> declares the oldest API level it actually needs instead of the newest one that exists.
 - JavaScript Script API pack; no TypeScript build step is required.
 - The project was statically checked and its pure logic was tested with Node. A live Bedrock client/server is not available in this repository, so the live-game checklist in `DEVELOPMENT.md` must be run in Bedrock before release.
 
@@ -41,6 +47,10 @@ https://github.com/ayushghbk-afk/mod-for-minecraft-/releases/download/bedrock-mo
 ```
 
 The workflow also uploads a **bedrock-mobile-modpack** artifact on the Actions run. See `INSTALL_MOBILE.md` for Android and iOS steps.
+
+> **Already imported an older copy?** Minecraft keeps using the version of a pack that the
+> world was saved with. After a fix you must download the new `.mcaddon`, import it again,
+> then open the world settings and remove + re-add both packs (or create a fresh world).
 
 ## Install on Android / Bedrock
 
@@ -80,7 +90,22 @@ The creating player becomes the owner. Exact controls:
 !aibot return
 !aibot cancel
 !aibot resume
+!aibot list
+!aibot remove <name>
+!aibot info
 ```
+
+`!aibot info` prints script version, which chat signal the pack bound to, whether the tick
+loop is running, how many `aibot:companion` entities exist per dimension, and the last spawn
+error. It is the first thing to run when the bot "does nothing".
+
+Forgiving input: `aibot create Steve`, `!bot create Steve` and `!aibot: create Steve` are all
+accepted. A leading `/` is **not** — Bedrock intercepts `/…` as a game command and answers
+"Unknown command" before any script sees the text, so always type these in plain chat.
+
+No-chat alternative (useful on mobile): hold a **compass** and use it to open the create form,
+or the control panel if you already own a bot. Interacting with the bot itself also opens the
+panel.
 
 Natural-language examples (the bot name is required):
 
@@ -128,6 +153,23 @@ The default configuration uses the supplied Cloudflare Worker at `https://groq-p
 - Players other than the owner cannot issue instructions when `ownerOnly` is enabled.
 - Permanently denied named commands include `op`, `deop`, `stop`, `ban`, `kill` and `give`.
 - API keys are not accepted by the in-world settings form and are never written to dynamic properties.
+
+## Troubleshooting "!aibot create Steve does nothing"
+
+Work through this in order; the first line that is false is your cause.
+
+| Check | Fix |
+|---|---|
+| You see the cyan **`[AI Bot v…] Script loaded`** message when you join the world | If you do not, the script module is not loading: re-import the newest `.mcaddon` and re-activate **both** packs on the world. |
+| `Settings → Profile` shows Bedrock **1.26.0+** | Update Minecraft. The pack cannot load on an older engine. |
+| Both **Autonomous AI Bot - Behavior** and **- Resources** are ACTIVE on that world | Activate them in *Edit World*, not just in global storage. |
+| You typed it in **chat**, with `!`, not as `/aibot …` | `/aibot` is answered by the game, never by this pack. |
+| `!aibot info` replies | If it replies but `create` fails, it prints the real spawn error (usually the behaviour pack is applied but the entity type is not registered — re-add the pack to the world). |
+| Chat is not muted/filtered and you are not on a server that strips `!` messages | Ask the server owner, or use the compass UI instead of chat. |
+
+Verbose content log (Windows Bedrock: `Settings → Creator → Enable Content Log`, or launch
+with `-verboseLogging`) prints `[aibot] script v… loaded; chat source: …`, which confirms the
+module loaded and which chat event it bound to.
 
 ## Documentation
 

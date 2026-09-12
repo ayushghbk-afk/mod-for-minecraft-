@@ -35,12 +35,44 @@ for f in behavior_packs/autonomous_ai_bot/scripts/**/*.js behavior_packs/autonom
 
 GitHub Actions is defined in `.github/workflows/build-addon.yml`. Every push, pull request and manual dispatch runs tests, syntax validation and `npm run build`, then uploads a **bedrock-mobile-modpack** artifact (`AI-Bot-Bedrock-Mobile.mcaddon` plus `.mcpack` files). Pushes also update the `bedrock-mobile-latest` GitHub Release so phones can download the pack. Pushing a tag such as `v1.0.1` additionally creates a versioned GitHub Release.
 
-The Node tests cover action rejection, plan limits, JSON parsing, task progress/pause/resume/completion, bounded memory, intent parsing, key removal and provider response validation. Files importing `@minecraft/server` cannot be executed by Node because that module exists only inside Bedrock; use the live checklist below for those parts.
+The Node tests cover action rejection, plan limits, JSON parsing, task progress/pause/resume/completion, bounded memory, intent parsing, key removal and provider response validation.
+
+`tests/command-e2e.test.mjs` goes further: it loads the real `scripts/main.js` against an
+in-memory stub of `@minecraft/server` and `@minecraft/server-ui` (`tests/stubs/`), wired up with
+`module.registerHooks` and the `#stub/*` subpath imports in `package.json`. That makes the chat
+command path testable outside Bedrock, so it asserts that:
+
+- the entry module loads and exports a script version;
+- `!aibot create Steve` really spawns an `aibot:companion` entity with owner metadata and
+  answers exactly once (a double-bound chat signal would spawn two bots);
+- tolerant prefixes (`aibot …`, `!bot …`, `!aibot: …`, upper case) still parse, while ordinary
+  sentences such as `bot follow me please` are ignored;
+- `!aibot info` reports the bound chat signal, tick loop and entity counts;
+- `!aibot remove` frees a name for re-creation;
+- a failed `spawnEntity` produces an actionable error instead of silence.
+
+The stub is test-only and lives outside `behavior_packs/`, so it is never packaged into the
+`.mcpack`. It requires Node **22.15+** (`module.registerHooks`); `npm test` is the same command
+CI runs. Anything that genuinely needs the live game is still covered by the checklist below.
+
+## Script API version policy
+
+Declare the **oldest** `@minecraft/server` level the code actually needs, never the newest one
+that exists. Bedrock refuses to load a script module whose declared dependency is newer than the
+API the client ships, and it fails **silently** — the pack imports, the entity may even render,
+but no command ever answers. Each stable build provides a specific level (26.0 → 2.5.0,
+26.20 → 2.7.0, 26.40 → 2.9.0), so pinning 2.9.0 excluded everyone below 26.40.
+
+When you use a newer API, raise the dependency deliberately, gate the call behind an optional
+accessor (the codebase already does this for chat signals via `safeSubscribe`), and document the
+minimum game version.
 
 ## Live Bedrock checklist
 
 Run in a disposable Bedrock 1.26.0+ world after importing both packs:
 
+0. Confirm the cyan `[AI Bot v…] Script loaded` join message and that `!aibot info` replies;
+   without those, nothing else can work.
 1. Create, despawn and recreate a bot; verify model, name tag, health and collision.
 2. Run `!aibot follow`, walk over uneven terrain, run `!aibot stop`, and check bounded movement/stuck recovery.
 3. Place oak logs and dropped items nearby. Run `Steve, get me 2 oak logs`; verify the block actually changes, item entities are picked up, inventory count increases, task reaches `2/2`, and the bot returns.

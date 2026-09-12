@@ -1,15 +1,28 @@
 import { parseBotCommand, parseIntent } from "./core/intent-parser.js";
 import { showControlPanel, showCreateBot } from "./ui/control-panel.js";
+import { SCRIPT_VERSION } from "./core/version.js";
 
 function help(player) {
   player.sendMessage([
-    "§bAI Bot commands§r",
-    "!aibot create <name> — create and own a bot",
-    "!aibot panel — open status, tasks, inventory and settings",
-    "!aibot status | inventory | follow | stop | return | cancel | protect | resume",
-    "Natural language also works: Steve, get me 32 oak logs.",
-    "Commands are disabled by default."
+    "§bAI Bot commands§r §8(v" + SCRIPT_VERSION + ")",
+    "§e!aibot create <name>§r — create and own a bot (default name Steve)",
+    "§e!aibot panel§r — status, tasks, inventory and settings",
+    "§e!aibot follow | stop | protect | return | cancel | resume§r",
+    "§e!aibot status | inventory | list§r",
+    "§e!aibot remove <name>§r — despawn a bot you own",
+    "§e!aibot info§r — script/engine diagnostics when something seems dead",
+    "Natural language also works: §fSteve, get me 32 oak logs§r.",
+    "Type these in §fchat§r with §f!§r — not as §f/aibot§r slash commands.",
+    "Server commands stay disabled by default (§e!aibot allow on§r)."
   ].join("\n"));
+}
+
+function reportCreate(player, result, name) {
+  if (result?.created) return true;
+  const reason = result?.reason || `${name} could not be created.`;
+  player.sendMessage(`§c[AI Bot] ${reason}§r`);
+  if (!result?.agent) player.sendMessage("§eDiagnostics: §f!aibot info§e. If this message never appears, the script is not loading — re-import the .mcaddon and re-activate the behavior pack on this world.§r");
+  return false;
 }
 
 export async function handleChat(player, message, controller) {
@@ -17,9 +30,21 @@ export async function handleChat(player, message, controller) {
   if (command) {
     switch (command.command) {
       case "help": help(player); return true;
-      case "create": controller.create(player, command.args.join(" ") || "Steve"); return true;
-      case "spawn": controller.create(player, command.args.join(" ") || "Steve"); return true;
-      case "list": player.sendMessage(controller.names().join(", ") || "No AI bots are loaded."); return true;
+      case "create":
+      case "spawn":
+      case "new": {
+        const name = command.args.join(" ") || "Steve";
+        reportCreate(player, controller.create(player, name), name);
+        return true;
+      }
+      case "list": player.sendMessage(controller.names().join(", ") || "No AI bots are loaded. Use §e!aibot create Steve§r."); return true;
+      case "info":
+      case "diag":
+      case "diagnostics":
+      case "doctor": player.sendMessage(controller.infoText()); return true;
+      case "remove":
+      case "despawn":
+      case "delete": player.sendMessage(controller.removeByName(player, command.args.join(" "))); return true;
       case "panel": await showControlPanel(player, controller); return true;
       case "status": player.sendMessage(controller.status(player, command.args.join(" "))); return true;
       case "inventory": player.sendMessage(controller.inventory(player, command.args.join(" "))); return true;
@@ -66,7 +91,10 @@ export async function handleChat(player, message, controller) {
         return true;
       }
       case "command": player.sendMessage(controller.runNamedCommand(player, command.args[0], command.args.slice(1))); return true;
-      default: help(player); return true;
+      default:
+        player.sendMessage(`§eUnknown AI Bot command "§f${command.command}§e".§r`);
+        help(player);
+        return true;
     }
   }
 
@@ -93,4 +121,4 @@ export async function handleChat(player, message, controller) {
   return true;
 }
 
-export { showCreateBot };
+export { showCreateBot, reportCreate };

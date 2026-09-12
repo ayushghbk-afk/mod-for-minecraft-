@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          find behavior_packs proxy scripts -type f \( -name '*.js' -o -name '*.mjs' \) -print0 2>/dev/null \
+          find behavior_packs proxy scripts tests -type f \( -name '*.js' -o -name '*.mjs' \) -print0 2>/dev/null \
             | xargs -0 -r -n1 node --check
 
       - name: Build Bedrock packs

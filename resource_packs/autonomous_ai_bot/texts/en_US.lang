@@ -1,2 +1,5 @@
 pack.name=Autonomous AI Bot Resources
 pack.description=Player-like model and textures for the Autonomous AI Bot on Bedrock and mobile.
+entity.aibot:companion.name=AI Bot
+item.spawn_egg.entity.aibot:companion.name=Spawn AI Bot
+action.interact.aibot.panel=Open AI Bot panel

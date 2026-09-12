@@ -1,2 +1,5 @@
 pack.name=Autonomous AI Bot Behavior
 pack.description=Player-like companion for Minecraft Bedrock, Pocket Edition, Android and iOS.
+entity.aibot:companion.name=AI Bot
+item.spawn_egg.entity.aibot:companion.name=Spawn AI Bot
+action.interact.aibot.panel=Open AI Bot panel

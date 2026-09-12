@@ -7,7 +7,11 @@
     "test": "node --test tests/*.test.mjs",
     "build": "node scripts/package.mjs"
   },
+  "imports": {
+    "#stub/bedrock": "./tests/stubs/bedrock.mjs",
+    "#stub/bedrock-ui": "./tests/stubs/bedrock-ui.mjs"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.15"
   }
 }
