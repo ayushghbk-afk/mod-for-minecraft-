@@ -1,5 +1,5 @@
 {
-  "format_version": "1.26.0",
+  "format_version": "1.20.0",
   "minecraft:entity": {
     "description": {
       "identifier": "aibot:companion",
@@ -54,9 +54,30 @@
       "minecraft:behavior.float": {
         "priority": 0
       },
+      "minecraft:behavior.look_at_player": {
+        "priority": 7,
+        "look_distance": 8,
+        "probability": 0.8
+      },
+      "minecraft:behavior.random_look_around": {
+        "priority": 8
+      },
       "minecraft:behavior.random_stroll": {
-        "priority": 8,
-        "speed_multiplier": 0.7
+        "priority": 9,
+        "speed_multiplier": 0.6,
+        "xz_dist": 8,
+        "interval": 200
+      },
+      "minecraft:breathable": {
+        "total_supply": 15,
+        "suffocate_time": 0,
+        "inhale_time": 0,
+        "breathes_air": true,
+        "breathes_water": false,
+        "generates_bubbles": false
+      },
+      "minecraft:experience_reward": {
+        "on_death": "query.last_hit_by_player ? 0 : 0"
       },
       "minecraft:interact": {
         "interactions": [
