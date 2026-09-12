@@ -1,0 +1,16 @@
+{
+  "provider": "fallback",
+  "endpoint": "",
+  "model": "",
+  "personality": "friendly",
+  "combatMode": "defend_owner",
+  "commandsEnabled": false,
+  "debug": false,
+  "ownerOnly": true,
+  "observationRadius": 8,
+  "observationIntervalTicks": 20,
+  "aiCooldownMs": 10000,
+  "maxPlanActions": 8,
+  "maxPlanDistance": 32,
+  "retryCount": 2
+}
