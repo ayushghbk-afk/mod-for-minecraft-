@@ -566,7 +566,9 @@ export class BotController {
       return {
         agent: null, created: false,
         reason: `Could not spawn ${BOT_ENTITY_ID}. ${lastError ? `Game said: ${lastError}. ` : ""}`
-          + "This almost always means the AI Bot behavior pack is not active on this world, or the world was created before the pack was added."
+          + "The scripts are running, so the behavior pack IS active — the entity definition itself was rejected by the game "
+          + "(that happens when entities/companion.json declares a format_version the game cannot parse). "
+          + "Re-import the latest AI-Bot-Bedrock-Mobile.mcaddon, keep exactly one copy of the pack active, and reload the world."
       };
     }
     try {

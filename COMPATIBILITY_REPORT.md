@@ -37,3 +37,23 @@ Audit date: 2026-09-12. Baseline: Minecraft Bedrock stable 26.40+, `@minecraft/s
 - A custom entity is not a simulated `Player`; it cannot use normal player hunger, recipe UI, beds, shields, or every item. Food is represented by consuming an owned food item and applying stable regeneration.
 - Stable mobile/Realm scripting has no portable outbound HTTP client. External AI requires a separately configured supported host bridge; deterministic fallback remains functional.
 - Bedrock itself cannot be launched in this CI sandbox. JSON, UUIDs, imports, JavaScript, tests, archive structure and current npm API definitions are validated here; device/world matrix testing remains a release-gate checklist in `DEVELOPMENT.md`.
+
+## v2.0.1 hotfix — entity definitions were never registered
+
+Symptom: `[AI Bot v2.0.0] Script loaded`, then
+`Auto-summon failed: Could not spawn aibot:companion. Game said: Invalid value passed to argument [0]. 'aibot:companion' is not a valid entity type.`
+— reported on worlds created *after* the add-on was installed, which rules out "pack not active".
+
+Cause: both entity files used `"format_version": "1.26.40"`, i.e. the *game* version. Entity JSON uses
+a separate content format-version scale; Mojang's samples top out at `1.21.50` for
+`minecraft:entity` and `1.10.0` for `minecraft:client_entity`. An unrecognised value makes the
+content parser drop the definition without an in-game error, so the scripts load normally while
+`aibot:companion` is never registered as an entity type.
+
+Fix:
+- `behavior_packs/autonomous_ai_bot/entities/companion.json` → `format_version` `1.21.50`.
+- `resource_packs/autonomous_ai_bot/entity/companion.entity.json` → `format_version` `1.10.0`.
+- `scripts/package.mjs` fails the build if any behaviour/client entity exceeds those versions.
+- `tests/compatibility.test.mjs` asserts the same bound plus the identifier and `is_summonable`.
+- The spawn-failure message no longer blames an inactive pack when the scripts are demonstrably running.
+- Pack/script version bumped to 2.0.1 so the fixed copy is distinguishable in the join banner.
