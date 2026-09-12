@@ -90,7 +90,7 @@ jobs:
           - `AI-Bot-Behavior.mcpack`
           - `AI-Bot-Resources.mcpack`
 
-          In-game: `!aibot create Steve` then `!aibot help`.
+          In-game: run `/aibot:create Steve` (slash command, no cheats needed), then `/aibot:help`. On builds where chat events exist, `!aibot create Steve` in chat also works.
           EOF
           )"
           if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then

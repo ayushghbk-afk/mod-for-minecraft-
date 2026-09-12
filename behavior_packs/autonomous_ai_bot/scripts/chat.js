@@ -5,14 +5,13 @@ import { SCRIPT_VERSION } from "./core/version.js";
 function help(player) {
   player.sendMessage([
     "§bAI Bot commands§r §8(v" + SCRIPT_VERSION + ")",
-    "§e!aibot create <name>§r — create and own a bot (default name Steve)",
-    "§e!aibot panel§r — status, tasks, inventory and settings",
-    "§e!aibot follow | stop | protect | return | cancel | resume§r",
-    "§e!aibot status | inventory | list§r",
-    "§e!aibot remove <name>§r — despawn a bot you own",
-    "§e!aibot info§r — script/engine diagnostics when something seems dead",
-    "Natural language also works: §fSteve, get me 32 oak logs§r.",
-    "Type these in §fchat§r with §f!§r — not as §f/aibot§r slash commands.",
+    "§e/aibot:create Steve§r — §fslash command§r, works on every current build (no cheats needed)",
+    "§e!aibot create Steve§r — chat form, only on builds where chat events exist",
+    "§e/aibot:panel§r §8(or §e!aibot panel§8§r) — status, tasks, inventory and settings",
+    "§e/aibot:follow | stop | return | protect | cancel | resume§r",
+    "§e/aibot:status | inventory | list | info§r, §e/aibot:remove <name>§r",
+    "Natural language also works in chat: §fSteve, get me 32 oak logs§r.",
+    "No chat on your build? Hold a §fcompass§r and use it — the menu needs no commands.",
     "Server commands stay disabled by default (§e!aibot allow on§r)."
   ].join("\n"));
 }
@@ -21,7 +20,7 @@ function reportCreate(player, result, name) {
   if (result?.created) return true;
   const reason = result?.reason || `${name} could not be created.`;
   player.sendMessage(`§c[AI Bot] ${reason}§r`);
-  if (!result?.agent) player.sendMessage("§eDiagnostics: §f!aibot info§e. If this message never appears, the script is not loading — re-import the .mcaddon and re-activate the behavior pack on this world.§r");
+  if (!result?.agent) player.sendMessage("§eDiagnostics: §f/aibot:info§e (or §f!aibot info§e). If this message never appears, the script is not loading — re-import the .mcaddon and re-activate the behavior pack on this world.§r");
   return false;
 }
 

@@ -1,4 +1,10 @@
-import { system, world } from "@minecraft/server";
+import {
+  CommandPermissionLevel,
+  CustomCommandParamType,
+  CustomCommandStatus,
+  system,
+  world
+} from "@minecraft/server";
 import { BotController } from "./core/bot-controller.js";
 import { handleChat } from "./chat.js";
 import { isCommandMessage, parseBotCommand } from "./core/intent-parser.js";
@@ -35,7 +41,12 @@ const lastUiOpen = new Map();
 
 function openUiWithItem(player) {
   let held = "";
-  try { held = player.getComponent("minecraft:inventory")?.container?.getItem(player.selectedSlotIndex ?? 0)?.typeId || ""; } catch { held = ""; }
+  try {
+    // 2.0.0 renamed Player.selectedSlotIndex to Player.selectedSlot; keep the old
+    // spelling as a fallback so the compass menu works on either API level.
+    const slot = player.selectedSlot ?? player.selectedSlotIndex ?? 0;
+    held = player.getComponent("minecraft:inventory")?.container?.getItem(slot)?.typeId || "";
+  } catch { held = ""; }
   if (held !== "minecraft:compass") return;
   const now = Date.now();
   if (now - (lastUiOpen.get(player.id) || 0) < 1200) return;
@@ -74,75 +85,98 @@ controller.diagnostics.chatSource = chatSource;
 controller.diagnostics.itemUseSource = itemUseSource;
 console.warn(`[aibot] script v${SCRIPT_VERSION} loaded; chat: ${chatSource}; compass menu: ${itemUseSource}`);
 
-// --- CUSTOM SLASH COMMAND SUPPORT (/aibot) like Verity ---
-// Bedrock 1.21+ supports custom commands via startup event. We register /aibot as a custom command
-// so players who type slash instead of ! still get the bot. This fixes the common "command not working" report.
-let customCommandRegistered = false;
+// --- CUSTOM SLASH COMMANDS (/aibot:create) — the fix for "the command does nothing" ---
+// Stable @minecraft/server 2.x (Bedrock 26.x) has NO chat events at all:
+// world.beforeEvents.chatSend / world.afterEvents.chatSend were removed in
+// 2.0.0 and are still beta-only. Chat commands like "!aibot create Steve"
+// therefore never reach this script on current builds — that is what the
+// "(chat: unavailable)" note means. The supported replacement is the Custom
+// Commands API (stable), registered during the startup event:
+//   • command names MUST be namespaced ("aibot:create", not "aibot") — a bare
+//     name makes registerCommand() throw and the command silently never exists;
+//   • permissionLevel Any + cheatsRequired false lets every player run them,
+//     even in worlds without cheats;
+//   • the callback runs in read-only mode, so all world changes are queued
+//     through system.run();
+//   • parameters must use CustomCommandParamType, not string type names.
+const SLASH_COMMANDS = Object.freeze({
+  create: { description: "Create your AI bot, e.g. /aibot:create Steve", arg: "bot name" },
+  help: { description: "Show AI Bot commands" },
+  panel: { description: "Open the AI Bot control panel" },
+  status: { description: "Show what your AI bot is doing", arg: "bot name" },
+  inventory: { description: "Show what your AI bot is carrying", arg: "bot name" },
+  list: { description: "List AI bots in this world" },
+  info: { description: "AI Bot diagnostics" },
+  follow: { description: "Make your AI bot follow you", arg: "bot name" },
+  stop: { description: "Stop your AI bot", arg: "bot name" },
+  return: { description: "Call your AI bot back to you", arg: "bot name" },
+  protect: { description: "Make your AI bot defend you", arg: "bot name" },
+  cancel: { description: "Cancel the AI bot's current task", arg: "bot name" },
+  resume: { description: "Resume a paused AI bot task", arg: "bot name" },
+  remove: { description: "Despawn your AI bot", arg: "bot name" }
+});
+
+let slashCommandsReady = false;
+
 try {
   if (system.beforeEvents?.startup) {
     system.beforeEvents.startup.subscribe((event) => {
-      try {
-        const registry = event.customCommandRegistry || event.customCommandRegistry; // compat
-        // Try new API: event.customCommandRegistry
-        const cmdReg = event.customCommandRegistry || event.customCommandRegistry;
-        // Different versions expose it as event.customCommandRegistry or event.customCommandRegistry
-        // We attempt to register; if API missing, this will throw and be caught.
-        const reg = event.customCommandRegistry || event.customCommandRegistry || event.customCommandRegistry;
-        // Actually use the official API if present
-        if (event.customCommandRegistry) {
-          event.customCommandRegistry.registerCommand(
-            {
-              name: "aibot",
-              description: "AI Bot commands: create, help, panel, status, etc.",
-              permissionLevel: 0,
-              cheats: "never",
-              mandatoryParameters: [],
-              optionalParameters: [
-                { name: "action", type: "String" },
-                { name: "name", type: "String" }
-              ]
-            },
-            (origin, action, name) => {
-              const player = origin?.sourceEntity;
-              if (!player || player.typeId !== "minecraft:player") {
-                return { status: 1, message: "Only players can use AI Bot commands." };
-              }
-              // Reconstruct chat-like command for existing handler
-              const cmdText = `!aibot ${action || ""} ${name || ""}`.trim();
-              system.run(() => {
-                handleChat(player, cmdText, controller).catch((e) => reportFailure(player, "Slash command", e));
-              });
-              return { status: 0 };
+      const registry = event?.customCommandRegistry;
+      if (!registry) return;
+      let registered = 0;
+      for (const [action, spec] of Object.entries(SLASH_COMMANDS)) {
+        const command = {
+          name: `aibot:${action}`,
+          description: spec.description,
+          permissionLevel: CommandPermissionLevel.Any,
+          cheatsRequired: false
+        };
+        if (spec.arg) command.optionalParameters = [{ name: "name", type: CustomCommandParamType.String }];
+        try {
+          registry.registerCommand(command, (origin, name) => {
+            const player = origin?.sourceEntity;
+            if (!player || player.typeId !== "minecraft:player") {
+              return { status: CustomCommandStatus.Failure, message: "Only players can use AI Bot commands." };
             }
-          );
-          customCommandRegistered = true;
-          console.warn("[aibot] custom slash command /aibot registered");
+            const argText = String(name ?? "").trim();
+            system.run(() => {
+              handleChat(player, `!aibot ${action}${argText ? ` ${argText}` : ""}`, controller)
+                .catch((error) => reportFailure(player, "Slash command", error));
+            });
+            return { status: CustomCommandStatus.Success };
+          });
+          registered += 1;
+        } catch (error) {
+          console.warn(`[aibot] could not register /aibot:${action}: ${error}`);
         }
-      } catch (e) {
-        console.warn(`[aibot] custom command registration failed (API may not be available on this version): ${e}`);
       }
+      slashCommandsReady = registered > 0;
+      const total = Object.keys(SLASH_COMMANDS).length;
+      controller.diagnostics.slashCommands = registered > 0
+        ? `${registered}/${total} registered (/aibot:create, /aibot:help, ...)`
+        : "NOT registered";
+      console.warn(`[aibot] custom slash commands: ${controller.diagnostics.slashCommands}`);
     });
   }
-} catch { /* startup event not available */ }
+} catch (error) {
+  console.warn(`[aibot] startup event unavailable; /aibot:* slash commands cannot be registered: ${error}`);
+}
 
-// Fallback for older API: try customCommandRegistry via world.beforeEvents? Some builds use system
-try {
-  // Also try the newer system-based custom command API if available
-  if (!customCommandRegistered && world.afterEvents?.customCommand) {
-    safeSubscribe(world.afterEvents.customCommand, (event) => {
-      try {
-        if (event.command !== "aibot") return;
-        const player = event.sourceEntity;
-        if (!player) return;
-        const action = event.parameters?.[0]?.value || "";
-        const name = event.parameters?.[1]?.value || "";
-        const cmdText = `!aibot ${action} ${name}`.trim();
-        system.run(() => handleChat(player, cmdText, controller).catch((e) => reportFailure(player, "Custom command", e)));
-      } catch {}
-    });
-    console.warn("[aibot] subscribed to afterEvents.customCommand for /aibot");
-  }
-} catch {}
+// --- /scriptevent bridge (extra fallback) ---
+// On worlds with cheats enabled, "/scriptevent aibot:cmd create Steve" (or
+// "/scriptevent aibot:create Steve") reaches the same handler as chat.
+controller.diagnostics.scriptEvent = safeSubscribe(system.afterEvents?.scriptEventReceive, (event) => {
+  const id = String(event?.id || "");
+  if (!id.startsWith("aibot:")) return;
+  const player = event.sourceEntity;
+  if (!player || player.typeId !== "minecraft:player") return;
+  const args = String(event.message || "").trim().split(/\s+/).filter(Boolean);
+  let action = id.slice("aibot:".length);
+  if (action === "cmd" || action === "") action = args.shift() || "";
+  if (!action) return;
+  const text = `!aibot ${[action, ...args].join(" ")}`.trim();
+  system.run(() => handleChat(player, text, controller).catch((error) => reportFailure(player, "Scriptevent command", error)));
+}) ? "available (/scriptevent aibot:cmd <command> ...)" : "unavailable";
 
 safeSubscribe(world.afterEvents?.entityDie, (event) => {
   if (event.deadEntity?.typeId === "aibot:companion") controller.handleDeath(event.deadEntity);
@@ -235,10 +269,31 @@ function tryAutoSummon(player, reason = "initial spawn") {
       // Mark world as having auto-summoned at least once, so we don't spam on every reload
       // But we still allow per-player summon on initialSpawn even after this flag.
       if (reason === "worldLoadZeroBots") setWorldAutoSummonedFlag();
+    } else if (result && !result.agent) {
+      // A silent failure here is indistinguishable from "the whole mod is dead".
+      console.warn(`[aibot] auto-summon failed for ${player.name}: ${result.reason}`);
+      try { player.sendMessage(`§c[AI Bot] Auto-summon failed:§r ${result.reason}`); } catch {}
     }
   } catch (error) {
     console.error(`[aibot] auto summon failed for ${player?.name}: ${error}`);
   }
+}
+
+/**
+ * What the join message should advertise, given what this game build actually
+ * supports. Exported so tests can pin the wording: a welcome message that
+ * tells players to type chat commands on a build without chat events is the
+ * single most confusing thing this pack used to do.
+ */
+export function welcomeLines(chatOk, slashOk) {
+  if (chatOk) {
+    return [`Type §e!aibot create Steve§r to spawn your bot, or §e!aibot help§r. Hold a §fcompass§r and use it for a menu without chat.`];
+  }
+  const lines = [`§eChat commands are unavailable on this game build — that is why §f!aibot …§e in chat does nothing.§r`];
+  if (slashOk) lines.push(`Run §e/aibot:create Steve§r like any slash command, or hold a §fcompass§r and use it for the menu.`);
+  else lines.push(`Hold a §fcompass§r and use it — the menu creates and controls a bot without any commands.`);
+  lines.push(`With cheats enabled, §e/scriptevent aibot:cmd create Steve§r also works.`);
+  return lines;
 }
 
 // Player spawn handler: welcome + auto summon
@@ -247,8 +302,9 @@ safeSubscribe(world.afterEvents?.playerSpawn, (event) => {
   // Delay slightly to let restore complete and world load
   system.runTimeout(() => {
     try {
-      event.player.sendMessage(`§b[AI Bot v${SCRIPT_VERSION}]§r Script loaded (chat: ${chatSource.startsWith("NONE") ? "§cunavailable§r" : "§aok§r"}).`);
-      event.player.sendMessage(`Type §e!aibot create Steve§r to spawn your bot, or §e!aibot help§r. Hold a §fcompass§r and use it for a menu without chat.`);
+      const chatOk = !chatSource.startsWith("NONE");
+      event.player.sendMessage(`§b[AI Bot v${SCRIPT_VERSION}]§r Script loaded (chat: ${chatOk ? "§aok§r" : "§cunavailable§r"}).`);
+      for (const line of welcomeLines(chatOk, slashCommandsReady)) event.player.sendMessage(line);
     } catch { /* player despawned during the delay */ }
   }, 10);
 

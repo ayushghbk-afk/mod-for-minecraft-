@@ -74,6 +74,8 @@ test("!aibot info proves the script engine is alive and reports the chat binding
   assert.match(replies[0], /diagnostics/);
   assert.match(replies[0], /Script: v\d+\.\d+\.\d+/);
   assert.match(replies[0], /Chat event: (before|after)Events\.chatSend/);
+  assert.match(replies[0], /Slash commands: /);
+  assert.match(replies[0], /Scriptevent bridge: /);
   assert.match(replies[0], /Compass menu event: (before|after)Events\.itemUse/);
   assert.match(replies[0], /Tick loop: running/);
   assert.match(replies[0], /Docbot/);
@@ -108,3 +110,36 @@ test("natural language still reaches the owner-bound bot", () => {
   const status = bedrock.command(player, "!aibot status");
   assert.match(status[0], /Status: FOLLOWING/);
 });
+
+test("custom slash commands register alongside chat and /aibot:create works", () => {
+  const registrations = new Map();
+  const registry = {
+    registerCommand(spec, callback) {
+      if (!/^[a-z0-9_]+:[a-z0-9_]+$/.test(String(spec.name))) {
+        throw new Error(`Custom command names must be namespaced, got '${spec.name}'`);
+      }
+      registrations.set(spec.name, { spec, callback });
+    }
+  };
+  bedrock.fireStartup(registry);
+
+  assert.equal(registrations.size, 14, "slash commands must register even when chat also works");
+  const player = bedrock.addPlayer("Slasher");
+  const result = registrations.get("aibot:create").callback({ sourceEntity: player }, "Slashy");
+  assert.equal(result.status, bedrock.CustomCommandStatus.Success);
+  bedrock.advance(4);
+  assert.match(player.sentMessages.join("\n"), /Created Slashy/);
+});
+
+test("the welcome message and auto-summon match a build where chat works", () => {
+  const player = bedrock.addPlayer("Greeter");
+  bedrock.world.afterEvents.playerSpawn.fire({ player, initialSpawn: true });
+  bedrock.advance(80);
+
+  const text = player.sentMessages.join("\n");
+  assert.match(text, /Script loaded \(chat: §aok§r\)/);
+  assert.match(text, /Type §e!aibot create Steve§r to spawn your bot/);
+  assert.match(text, /Auto-summoned AIBot/);
+  assert.ok(globalThis.__aibotController.byName("AIBot"), "auto-summon must spawn the bot for real");
+});
+

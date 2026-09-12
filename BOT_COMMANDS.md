@@ -2,25 +2,45 @@
 
 All examples assume the bot is named `Steve`. Names are case-insensitive for parsing and owner checks use both player id and name fallback.
 
-## Chat commands
+## Slash commands (work on every current build, no cheats needed)
+
+Stable `@minecraft/server` 2.x — the API level this pack targets — has **no chat events**,
+so these namespaced custom commands are the primary way to control the bot. They are
+registered during the script startup event with `permissionLevel: Any` and
+`cheatsRequired: false`, and autocomplete as you type them:
 
 | Command | Effect |
 |---|---|
+| `/aibot:help` | Show help |
+| `/aibot:create Steve` | Spawn an owner-bound bot |
+| `/aibot:panel` | Open control UI |
+| `/aibot:list` | List loaded bots |
+| `/aibot:status` | Grounded status, task, health and inventory occupancy |
+| `/aibot:inventory` | Actual inventory slots and counts |
+| `/aibot:follow` | Follow owner |
+| `/aibot:stop` | Stop and pause the current task |
+| `/aibot:protect` | Defend owner mode |
+| `/aibot:return` | Return to the owner/home position |
+| `/aibot:cancel` | Cancel the current task |
+| `/aibot:resume` | Resume a paused task after recovery |
+| `/aibot:remove <name>` | Despawn a bot you own and free its name |
+| `/aibot:info` | Script version, chat binding, slash registration, tick loop, entity counts and last spawn error |
+
+The name parameter is optional where it makes sense (`status`, `inventory`, `follow`, `stop`,
+`return`, `protect`, `cancel`, `resume`, `remove`); without it the command targets your own bot.
+
+## Chat commands (only on builds where chat events exist)
+
+If the join message says `chat: ok`, the same actions also work as chat messages with the
+`!` prefix. On Bedrock 26.x builds it says `chat: unavailable` — Mojang removed the
+`chatSend` events from the stable script API, so **nothing typed in chat can reach the
+script** and the slash commands above are the only text interface.
+
+| Command | Effect |
+|---|---|
+| `!aibot create Steve` | Spawn an owner-bound bot (`spawn`, `new` are aliases) |
 | `!aibot help` | Show help |
-| `!aibot create Steve` | Spawn an owner-bound bot |
-| `!aibot spawn Steve` | Alias for create; respawn through the controller |
 | `!aibot panel` | Open control UI |
-| `!aibot list` | List loaded bots |
-| `!aibot status` | Grounded status, task, health and inventory occupancy |
-| `!aibot inventory` | Actual inventory slots and counts |
-| `!aibot follow` | Follow owner |
-| `!aibot stop` | Stop and pause the current task |
-| `!aibot protect` | Defend owner mode |
-| `!aibot return` | Return to the owner/home position |
-| `!aibot cancel` | Cancel the current task |
-| `!aibot resume` | Resume a paused task after recovery |
-| `!aibot remove <name>` | Despawn a bot you own and free its name |
-| `!aibot info` | Script version, chat binding, tick loop, entity counts and last spawn error |
 | `!aibot allow on` | Enable named allowlisted server commands |
 | `!aibot debug on` | Enable per-bot debug setting |
 
@@ -28,19 +48,21 @@ The UI exposes provider, model, personality, combat mode, command and debug sett
 
 ### Typing rules
 
-- These are **chat** messages, not slash commands. `/aibot create Steve` is answered by the
-  game with "Unknown command" and never reaches the script.
-- Accepted prefixes: `!aibot`, `aibot`, `!bot`, `!ai`, and an optional `:` after the prefix.
+- Slash commands must be namespaced: `/aibot:create Steve`, not `/aibot create Steve`.
+  A bare `/aibot` has never been registered and Bedrock answers "Unknown command".
+- Chat prefixes: `!aibot`, `aibot`, `!bot`, `!ai`, and an optional `:` after the prefix.
   Name matching is case-insensitive.
+- `/scriptevent aibot:cmd <command> [args]` (cheats worlds only) reaches the same handler,
+  e.g. `/scriptevent aibot:cmd create Steve`.
 - If nothing replies at all, the script module is not loading. Run the troubleshooting table in
   `README.md`; the usual cause is a stale imported pack or a game version older than the
   `@minecraft/server` level the manifest declares.
 
-### Without chat
+### Without chat (the default on current builds)
 
-Hold a **compass** and use it to open the create form (or the control panel once you own a bot).
-Interacting with the bot entity also opens its panel, which matters on touch screens where chat
-is awkward.
+Use the `/aibot:*` slash commands above, or hold a **compass** and use it to open the create
+form (or the control panel once you own a bot). Interacting with the bot entity also opens
+its panel, which matters on touch screens where chat is awkward.
 
 ## Natural language
 

@@ -78,6 +78,6 @@ export async function showCreateBot(player, controller) {
   const form = new ModalFormData().title("Create AI Bot").textField("Bot name", "Steve", "Steve").toggle("Start following", true);
   const response = await form.show(player);
   if (response.canceled || !response.formValues) return;
-  const agent = controller.create(player, String(response.formValues[0] || "Steve")).agent;
-  if (response.formValues[1]) agent.follow();
+  const result = controller.create(player, String(response.formValues[0] || "Steve"));
+  if (result?.agent && response.formValues[1]) result.agent.follow();
 }
