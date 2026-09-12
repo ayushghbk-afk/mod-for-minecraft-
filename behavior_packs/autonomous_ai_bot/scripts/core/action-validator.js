@@ -8,10 +8,10 @@ export const ACTION_TYPES = Object.freeze([
 export const ALLOWED_BLOCKS = Object.freeze(new Set([
   "minecraft:oak_log", "minecraft:spruce_log", "minecraft:birch_log", "minecraft:jungle_log",
   "minecraft:acacia_log", "minecraft:dark_oak_log", "minecraft:mangrove_log", "minecraft:cherry_log",
-  "minecraft:stripped_oak_log", "minecraft:stone", "minecraft:cobblestone", "minecraft:dirt",
-  "minecraft:grass_block", "minecraft:coal_ore", "minecraft:iron_ore", "minecraft:copper_ore",
-  "minecraft:gold_ore", "minecraft:redstone_ore", "minecraft:lapis_ore", "minecraft:diamond_ore",
-  "minecraft:crafting_table", "minecraft:chest", "minecraft:furnace"
+  "minecraft:stripped_oak_log", "minecraft:stone", "minecraft:cobblestone", "minecraft:deepslate", "minecraft:cobbled_deepslate", "minecraft:dirt",
+  "minecraft:grass_block", "minecraft:sand", "minecraft:gravel", "minecraft:coal_ore", "minecraft:deepslate_coal_ore", "minecraft:iron_ore", "minecraft:deepslate_iron_ore", "minecraft:copper_ore", "minecraft:deepslate_copper_ore",
+  "minecraft:gold_ore", "minecraft:deepslate_gold_ore", "minecraft:redstone_ore", "minecraft:deepslate_redstone_ore", "minecraft:lapis_ore", "minecraft:deepslate_lapis_ore", "minecraft:diamond_ore", "minecraft:deepslate_diamond_ore",
+  "minecraft:crafting_table", "minecraft:chest", "minecraft:trapped_chest", "minecraft:furnace"
 ]));
 
 const ID_PATTERN = /^minecraft:[a-z0-9_]+$/;

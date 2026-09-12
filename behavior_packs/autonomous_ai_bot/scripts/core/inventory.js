@@ -44,7 +44,13 @@ export function readInventory(entity) {
       if (item) equipment[name] = itemRecord(item, name);
     }
   } catch { /* equipment is optional on older entities */ }
-  return { slots, size: container.size, freeSlots: container.emptySlotsCount, totalItems, equipment };
+  const compact = [];
+  for (const item of slots) {
+    const existing = compact.find((entry) => entry.id === item.id);
+    if (existing) existing.count += item.count;
+    else compact.push({ id: item.id, name: item.name, count: item.count });
+  }
+  return { slots, size: container.size, freeSlots: container.emptySlotsCount, totalItems, equipment, selectedItem: equipment.Mainhand || null, summary: compact.slice(0, 16) };
 }
 
 export function countItem(entity, typeId) {
@@ -86,8 +92,10 @@ export function equipItem(entity, typeId) {
     if (!item || item.typeId !== typeId) continue;
     try {
       const equipment = entity.getComponent("minecraft:equippable");
-      equipment.setEquipment(EquipmentSlot.Mainhand, item);
-      container.setItem(slot, undefined);
+      if (!equipment) return { success: false, reason: "Equipment component is unavailable." };
+      const previous = equipment.getEquipment(EquipmentSlot.Mainhand);
+      if (!equipment.setEquipment(EquipmentSlot.Mainhand, item)) return { success: false, reason: "Item is not accepted by the main hand slot." };
+      container.setItem(slot, previous);
       return { success: true, item: typeId };
     } catch (error) {
       return { success: false, reason: `Equipment API rejected item: ${String(error)}` };

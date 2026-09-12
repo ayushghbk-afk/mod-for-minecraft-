@@ -39,7 +39,7 @@ Double-click `AI-Bot-Bedrock-Mobile.mcaddon`, or copy the `.mcpack` files into M
    re-add **Autonomous AI Bot - Behavior** and **Autonomous AI Bot - Resources** (or make a new
    world). An old cached pack is the single most common cause.
 2. **Check the game version.** You need Bedrock / Pocket Edition **1.26.0 or newer**
-   (Settings → Profile). The manifest targets `@minecraft/server` 2.5.0, which ships with 26.0,
+   (Settings → Profile). The manifest targets `@minecraft/server` 2.9.0, which ships with 26.0,
    so every 1.26.x build can load it. If a pack asks for a newer script version than your game
    provides, Bedrock skips the scripts **silently**.
 3. **Look for the join message.** When the script loads you get a cyan

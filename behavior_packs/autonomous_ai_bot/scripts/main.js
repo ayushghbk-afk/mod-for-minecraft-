@@ -43,9 +43,8 @@ const lastUiOpen = new Map();
 function openUiWithItem(player) {
   let held = "";
   try {
-    // 2.0.0 renamed Player.selectedSlotIndex to Player.selectedSlot; keep the old
-    // spelling as a fallback so the compass menu works on either API level.
-    const slot = player.selectedSlot ?? player.selectedSlotIndex ?? 0;
+    // selectedSlotIndex is the stable @minecraft/server 2.9 property.
+    const slot = player.selectedSlotIndex;
     held = player.getComponent("minecraft:inventory")?.container?.getItem(slot)?.typeId || "";
   } catch { held = ""; }
   if (held !== "minecraft:compass") return;
@@ -73,12 +72,16 @@ const itemUseSource = (() => {
 // Binding both would double-execute commands, so we bind exactly one.
 // This is the most common "bot not working" cause: a missing signal that fails silently.
 const chatSource = (() => {
-  if (safeSubscribe(world.beforeEvents?.chatSend, (event) => {
+  // chatSend is absent from stable 2.9. Reflective lookup keeps chat support on
+  // hosts that explicitly add that signal without importing any beta module.
+  const beforeChat = Reflect.get(world.beforeEvents, "chatSend");
+  if (safeSubscribe(beforeChat, (event) => {
     onChatMessage(event.sender, String(event.message || ""), () => { event.cancel = true; });
-  })) return "beforeEvents.chatSend (commands are hidden from chat)";
-  if (safeSubscribe(world.afterEvents?.chatSend, (event) => {
+  })) return "beforeEvents.chatSend (host extension; commands hidden)";
+  const afterChat = Reflect.get(world.afterEvents, "chatSend");
+  if (safeSubscribe(afterChat, (event) => {
     onChatMessage(event.sender, String(event.message || ""), null);
-  })) return "afterEvents.chatSend (commands stay visible in chat)";
+  })) return "afterEvents.chatSend (host extension; commands visible)";
   return "NONE — chat commands are unavailable on this game build";
 })();
 
@@ -132,7 +135,7 @@ try {
           permissionLevel: CommandPermissionLevel.Any,
           cheatsRequired: false
         };
-        if (spec.arg) command.optionalParameters = [{ name: "name", type: CustomCommandParamType.String }];
+        if ("arg" in spec && spec.arg) command.optionalParameters = [{ name: "name", type: CustomCommandParamType.String }];
         try {
           registry.registerCommand(command, (origin, name) => {
             const player = origin?.sourceEntity;
@@ -319,8 +322,7 @@ function tryAutoSummon(player, reason = "initial spawn") {
   try {
     if (!player) return;
     // Safety: entity must still be valid
-    try { if (player.removed) return; } catch {}
-    try { if (typeof player.isValid === "function" && !player.isValid()) return; } catch {}
+    try { if (!player.isValid) return; } catch (error) { return; }
     // Don't auto-summon if player already owns a bot
     if (controller.forPlayer(player)) return;
     // Don't spam if world already has many bots

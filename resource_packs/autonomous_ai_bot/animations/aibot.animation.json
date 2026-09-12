@@ -1,0 +1,21 @@
+{
+  "format_version": "1.8.0",
+  "animations": {
+    "animation.aibot.walk": {
+      "loop": true,
+      "animation_length": 1.0,
+      "bones": {
+        "leftLeg": { "rotation": ["math.cos(query.life_time * 180.0) * 28.0 * query.modified_move_speed", 0, 0] },
+        "rightLeg": { "rotation": ["-math.cos(query.life_time * 180.0) * 28.0 * query.modified_move_speed", 0, 0] },
+        "leftArm": { "rotation": ["-math.cos(query.life_time * 180.0) * 22.0 * query.modified_move_speed", 0, 0] },
+        "rightArm": { "rotation": ["math.cos(query.life_time * 180.0) * 22.0 * query.modified_move_speed", 0, 0] }
+      }
+    },
+    "animation.aibot.look": {
+      "loop": true,
+      "bones": {
+        "head": { "rotation": ["query.target_x_rotation", "query.target_y_rotation", 0] }
+      }
+    }
+  }
+}

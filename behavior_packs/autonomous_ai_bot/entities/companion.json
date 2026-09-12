@@ -1,5 +1,5 @@
 {
-  "format_version": "1.20.0",
+  "format_version": "1.26.40",
   "minecraft:entity": {
     "description": {
       "identifier": "aibot:companion",
@@ -7,38 +7,36 @@
       "is_summonable": true,
       "is_experimental": false
     },
+    "component_groups": {
+      "aibot:active": {
+        "minecraft:persistent": {}
+      }
+    },
     "components": {
-      "minecraft:type_family": {
-        "family": ["aibot", "mob", "player_like"]
-      },
-      "minecraft:collision_box": {
-        "width": 0.6,
-        "height": 1.8
-      },
-      "minecraft:health": {
-        "value": 20,
-        "max": 20
-      },
-      "minecraft:movement": {
-        "value": 0.1
-      },
+      "minecraft:type_family": { "family": ["aibot", "mob", "player_like"] },
+      "minecraft:collision_box": { "width": 0.6, "height": 1.8 },
+      "minecraft:health": { "value": 20, "max": 20 },
+      "minecraft:attack": { "damage": 4 },
+      "minecraft:follow_range": { "value": 32, "max": 48 },
+      "minecraft:movement": { "value": 0.25 },
       "minecraft:movement.basic": {},
       "minecraft:navigation.walk": {
         "can_path_over_water": false,
+        "avoid_water": true,
         "avoid_damage_blocks": true,
         "can_open_doors": false,
-        "can_pass_doors": true
+        "can_pass_doors": true,
+        "can_walk": true
       },
       "minecraft:jump.static": {},
-      "minecraft:physics": {},
-      "minecraft:pushable": {
-        "is_pushable": true,
-        "is_pushable_by_piston": true
-      },
+      "minecraft:can_climb": {},
+      "minecraft:physics": { "has_collision": true, "has_gravity": true },
+      "minecraft:pushable": { "is_pushable": true, "is_pushable_by_piston": true },
+      "minecraft:knockback_resistance": { "value": 0.2 },
       "minecraft:inventory": {
         "container_type": "inventory",
         "inventory_size": 36,
-        "private": false,
+        "private": true,
         "restrict_to_owner": false
       },
       "minecraft:equippable": {
@@ -51,23 +49,9 @@
           { "slot": 5, "accepted_items": ["minecraft:leather_boots", "minecraft:chainmail_boots", "minecraft:iron_boots", "minecraft:diamond_boots", "minecraft:netherite_boots"] }
         ]
       },
-      "minecraft:behavior.float": {
-        "priority": 0
-      },
-      "minecraft:behavior.look_at_player": {
-        "priority": 7,
-        "look_distance": 8,
-        "probability": 0.8
-      },
-      "minecraft:behavior.random_look_around": {
-        "priority": 8
-      },
-      "minecraft:behavior.random_stroll": {
-        "priority": 9,
-        "speed_multiplier": 0.6,
-        "xz_dist": 8,
-        "interval": 200
-      },
+      "minecraft:behavior.float": { "priority": 0 },
+      "minecraft:behavior.look_at_player": { "priority": 7, "look_distance": 8, "probability": 0.25 },
+      "minecraft:behavior.random_look_around": { "priority": 8 },
       "minecraft:breathable": {
         "total_supply": 15,
         "suffocate_time": 0,
@@ -76,31 +60,26 @@
         "breathes_water": false,
         "generates_bubbles": false
       },
-      "minecraft:experience_reward": {
-        "on_death": "query.last_hit_by_player ? 0 : 0"
-      },
+      "minecraft:experience_reward": { "on_death": 0 },
       "minecraft:interact": {
-        "interactions": [
-          {
-            "interact_text": "action.interact.aibot.panel",
-            "cooldown": 0.4,
-            "swing": true,
-            "on_interact": {
-              "filters": { "all_of": [ { "test": "is_family", "subject": "other", "value": "player" } ] },
-              "target": "self"
-            }
+        "interactions": [{
+          "interact_text": "action.interact.aibot.panel",
+          "cooldown": 0.4,
+          "swing": true,
+          "on_interact": {
+            "filters": { "test": "is_family", "subject": "other", "value": "player" },
+            "event": "aibot:opened_panel",
+            "target": "self"
           }
-        ]
+        }]
       },
       "minecraft:nameable": {},
-      "minecraft:damage_sensor": {
-        "triggers": [
-          {
-            "cause": "fall",
-            "deals_damage": true
-          }
-        ]
-      }
+      "minecraft:damage_sensor": { "triggers": [{ "cause": "fall", "deals_damage": true }] },
+      "minecraft:conditional_bandwidth_optimization": {}
+    },
+    "events": {
+      "minecraft:entity_spawned": { "add": { "component_groups": ["aibot:active"] } },
+      "aibot:opened_panel": {}
     }
   }
 }

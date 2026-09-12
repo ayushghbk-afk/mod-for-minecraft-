@@ -5,7 +5,7 @@ import { validatePlan } from "./action-validator.js";
 import { makeObservation } from "./observation.js";
 import { MemoryStore } from "./memory.js";
 import { TaskManager, TaskStatus } from "./task-manager.js";
-import { countItem, readInventory } from "./inventory.js";
+import { consumeItem, countItem, equipItem, readInventory } from "./inventory.js";
 import { BotState, readBotStatus, setBotStatus } from "./status.js";
 import { fallbackPlan, safeFallback } from "./planner.js";
 import { providerFor } from "./ai-provider.js";
@@ -19,14 +19,18 @@ const DROP_FOR_BLOCK = Object.freeze({
   "minecraft:iron_ore": "minecraft:raw_iron", "minecraft:gold_ore": "minecraft:raw_gold",
   "minecraft:copper_ore": "minecraft:raw_copper", "minecraft:coal_ore": "minecraft:coal",
   "minecraft:diamond_ore": "minecraft:diamond", "minecraft:redstone_ore": "minecraft:redstone",
-  "minecraft:lapis_ore": "minecraft:lapis_lazuli", "minecraft:stone": "minecraft:cobblestone"
+  "minecraft:lapis_ore": "minecraft:lapis_lazuli", "minecraft:stone": "minecraft:cobblestone",
+  "minecraft:deepslate_iron_ore": "minecraft:raw_iron", "minecraft:deepslate_gold_ore": "minecraft:raw_gold",
+  "minecraft:deepslate_copper_ore": "minecraft:raw_copper", "minecraft:deepslate_coal_ore": "minecraft:coal",
+  "minecraft:deepslate_diamond_ore": "minecraft:diamond", "minecraft:deepslate_redstone_ore": "minecraft:redstone",
+  "minecraft:deepslate_lapis_ore": "minecraft:lapis_lazuli", "minecraft:deepslate": "minecraft:cobbled_deepslate"
 });
 
 function positionArray(position) { return [Math.round(position.x), Math.round(position.y), Math.round(position.z)]; }
 function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
 function isHostile(type) { return /zombie|skeleton|creeper|spider|witch|enderman|phantom/.test(String(type)); }
 function isValidEntity(entity) {
-  try { return Boolean(entity && entity.isValid !== false && (!entity.isValid || entity.isValid())); } catch { return false; }
+  try { return Boolean(entity && entity.isValid === true); } catch (error) { return false; }
 }
 
 class BotAgent {
@@ -223,12 +227,30 @@ class BotAgent {
           if (isHostile(candidate.typeId)) candidates.add(candidate);
         }
       }
-      return [...candidates].sort((a, b) => distance(this.entity.location, a.location) - distance(this.entity.location, b.location))[0] || null;
+      const priority = { "minecraft:creeper": 100, "minecraft:skeleton": 80, "minecraft:witch": 75, "minecraft:zombie": 60, "minecraft:spider": 40 };
+      return [...candidates].sort((a, b) => (priority[b.typeId] || 20) - (priority[a.typeId] || 20) || distance(this.entity.location, a.location) - distance(this.entity.location, b.location))[0] || null;
     } catch { return null; }
   }
 
   handleCombat() {
     const target = isValidEntity(this.runtime.combatTarget) ? this.runtime.combatTarget : this.findThreat();
+    let ownHealth;
+    try { ownHealth = this.entity.getComponent("minecraft:health"); } catch (error) { ownHealth = null; }
+    if (target && ownHealth && ownHealth.currentValue <= Math.max(6, ownHealth.effectiveMax * 0.3)) {
+      const foods = [["minecraft:cooked_beef", 8], ["minecraft:bread", 5], ["minecraft:apple", 4]];
+      const food = foods.find(([id]) => countItem(this.entity, id) > 0);
+      if (food && consumeItem(this.entity, food[0], 1).success) {
+        try { this.entity.addEffect("regeneration", 80, { amplifier: 0, showParticles: true }); } catch (error) { /* Food remains consumed; effect failure is logged in memory below. */ }
+        this.memory.event(`Automatically ate ${food[0]} at ${Math.ceil(ownHealth.currentValue)} health.`, "recovery");
+        setBotStatus(this.entity, BotState.EATING, { target: food[0] });
+        return true;
+      }
+      const away = { x: this.entity.location.x + (this.entity.location.x - target.location.x) * 3, y: this.entity.location.y, z: this.entity.location.z + (this.entity.location.z - target.location.z) * 3 };
+      this.runtime.targetPosition = away;
+      this.engine.execute({ type: "move_to_target" });
+      setBotStatus(this.entity, BotState.FLEEING, { target: target.typeId, distance: distance(this.entity.location, target.location) });
+      return true;
+    }
     if (!target) {
       if (this.runtime.combatTarget) {
         this.runtime.combatTarget = null;
@@ -246,6 +268,11 @@ class BotAgent {
       this.notify(`§c⚠ ${target.typeId} detected. Task paused.`);
     }
     this.runtime.combatTarget = target;
+    const inventory = readInventory(this.entity);
+    if (!String(inventory.selectedItem?.id || "").includes("sword")) {
+      const weapon = ["minecraft:netherite_sword", "minecraft:diamond_sword", "minecraft:iron_sword", "minecraft:stone_sword", "minecraft:wooden_sword"].find((id) => countItem(this.entity, id) > 0);
+      if (weapon) equipItem(this.entity, weapon);
+    }
     this.engine.execute({ type: "attack_entity" });
     try {
       const health = target.getComponent("minecraft:health");
@@ -269,6 +296,7 @@ class BotAgent {
       return;
     }
     const action = plan.actions[this.runtime.planIndex];
+    /** @type {any} */
     const result = this.engine.execute(action);
     this.runtime.lastAction = result;
     if (result.success) {
@@ -326,6 +354,7 @@ class BotAgent {
     this.runtime.tick = tick;
     if (tick % Math.max(10, this.config.observationIntervalTicks) === 0 || !this.observation) {
       this.observation = makeObservation(this.entity, this.tasks.current, this.memory, this.config);
+      this.memory.observe(this.observation);
       if (this.tasks.current?.status === TaskStatus.ACTIVE) {
         this.tasks.syncCount(countItem(this.entity, this.currentCollectionItem()));
         if (this.tasks.current?.status === TaskStatus.COMPLETED && !this.runtime.returningAfterTask) {
@@ -352,6 +381,7 @@ class BotAgent {
       this.executePlan();
       const target = this.runtime.targetBlock || this.runtime.targetPosition;
       const stuck = this.runtime.stuck.update(this.entity.location, target);
+      if (stuck.stuck) setBotStatus(this.entity, stuck.attempts > 1 ? BotState.RECOVERING : BotState.STUCK, { target: "recalculating route" });
       if (stuck.stuck && stuck.attempts > 3) {
         this.runtime.plan = null;
         this.runtime.targetBlock = null;

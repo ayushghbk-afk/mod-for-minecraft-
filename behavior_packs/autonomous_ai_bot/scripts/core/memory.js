@@ -11,6 +11,9 @@ export class MemoryStore {
       completedTasks: Array.isArray(data.completedTasks) ? data.completedTasks.slice(-12) : [],
       failedTasks: Array.isArray(data.failedTasks) ? data.failedTasks.slice(-12) : [],
       locations: Array.isArray(data.locations) ? data.locations.slice(-MAX_LOCATIONS) : [],
+      knownResources: Array.isArray(data.knownResources) ? data.knownResources.slice(-24) : [],
+      knownPlayers: Array.isArray(data.knownPlayers) ? data.knownPlayers.slice(-12) : [],
+      knownDangerZones: Array.isArray(data.knownDangerZones) ? data.knownDangerZones.slice(-12) : [],
       facts: Array.isArray(data.facts) ? data.facts.slice(-20) : [],
       playerRequests: Array.isArray(data.playerRequests) ? data.playerRequests.slice(-12) : []
     };
@@ -35,6 +38,24 @@ export class MemoryStore {
     this.data.locations = this.data.locations.slice(-MAX_LOCATIONS);
   }
 
+  observe(observation) {
+    if (!observation) return;
+    for (const block of (observation.blocks || []).slice(0, 8)) {
+      const value = { id: block.id, position: block.position, dimension: observation.dimension, at: Date.now() };
+      const existing = this.data.knownResources.find((entry) => entry.id === value.id && entry.dimension === value.dimension);
+      if (existing) Object.assign(existing, value); else this.data.knownResources.push(value);
+    }
+    for (const player of observation.players || []) {
+      const value = { name: player.name, distance: player.distance, direction: player.direction?.compass, at: Date.now() };
+      const existing = this.data.knownPlayers.find((entry) => entry.name === value.name);
+      if (existing) Object.assign(existing, value); else this.data.knownPlayers.push(value);
+    }
+    if (observation.danger) this.data.knownDangerZones.push({ position: observation.position, dimension: observation.dimension, threats: observation.threats.slice(0, 4).map((item) => item.type), at: Date.now() });
+    this.data.knownResources = this.data.knownResources.slice(-24);
+    this.data.knownPlayers = this.data.knownPlayers.slice(-12);
+    this.data.knownDangerZones = this.data.knownDangerZones.slice(-12);
+  }
+
   fact(text) {
     const value = String(text).slice(0, 180);
     if (!this.data.facts.some((fact) => fact.text === value)) this.data.facts.push({ text: value, at: Date.now() });
@@ -56,6 +77,9 @@ export class MemoryStore {
       currentTask: task ? { id: task.id, goal: task.goal, status: task.status, progress: task.progress, target: task.target, remaining: task.remaining } : null,
       importantFacts: this.data.facts.slice(-8),
       knownLocations: this.data.locations.slice(-8),
+      knownResources: this.data.knownResources.slice(-8),
+      knownPlayers: this.data.knownPlayers.slice(-6),
+      knownDangerZones: this.data.knownDangerZones.slice(-4),
       recentEvents: this.data.shortTerm.slice(-8),
       previousRequests: this.data.playerRequests.slice(-4)
     };
