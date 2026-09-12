@@ -29,6 +29,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install Node dependencies
+        run: npm ci
+
       - name: Install zip
         run: sudo apt-get update -y && sudo apt-get install -y zip
 
