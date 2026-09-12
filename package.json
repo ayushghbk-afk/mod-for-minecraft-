@@ -1,11 +1,13 @@
 {
   "name": "autonomous-minecraft-ai-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "build": "node scripts/package.mjs"
+    "typecheck": "tsc -p jsconfig.json",
+    "validate": "npm run typecheck && npm test",
+    "build": "npm run validate && node scripts/package.mjs"
   },
   "imports": {
     "#stub/bedrock": "./tests/stubs/bedrock.mjs",
@@ -13,5 +15,10 @@
   },
   "engines": {
     "node": ">=22.15"
+  },
+  "devDependencies": {
+    "@minecraft/server": "2.9.0",
+    "@minecraft/server-ui": "2.1.0",
+    "typescript": "5.9.2"
   }
 }

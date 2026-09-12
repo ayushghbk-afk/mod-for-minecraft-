@@ -80,7 +80,7 @@ simulate a chat-less build and fail if any of those rules regresses.
 
 ## Live Bedrock checklist
 
-Run in a disposable Bedrock 1.26.0+ world after importing both packs:
+Run in a disposable Bedrock 1.26.40+ world after importing both packs:
 
 0. Confirm the cyan `[AI Bot v…] Script loaded` join message and that `/aibot:info` replies;
    without those, nothing else can work. Verify the message's `chat:` note matches reality and

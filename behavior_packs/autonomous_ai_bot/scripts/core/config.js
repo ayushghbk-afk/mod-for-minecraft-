@@ -38,6 +38,7 @@ function safeEndpoint(value) {
  * belong in the optional proxy documented in AI_PROVIDERS.md.
  */
 export function sanitiseConfig(value = {}) {
+  /** @type {Record<string, any>} */
   const source = value && typeof value === "object" ? value : {};
   // Whitelist fields instead of spreading source: this intentionally drops
   // apiKey and any other unrecognized secret/control field.

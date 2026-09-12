@@ -16,6 +16,9 @@ export const BotState = Object.freeze({
   RETURNING: "RETURNING",
   SLEEPING: "SLEEPING",
   WAITING: "WAITING",
+  STUCK: "STUCK",
+  RECOVERING: "RECOVERING",
+  FLEEING: "FLEEING",
   ERROR: "ERROR"
 });
 
@@ -37,6 +40,9 @@ const ICONS = Object.freeze({
   RETURNING: "§a←",
   SLEEPING: "§9Z",
   WAITING: "§7…",
+  STUCK: "§c!",
+  RECOVERING: "§e↻",
+  FLEEING: "§c←",
   ERROR: "§c!"
 });
 
@@ -46,9 +52,11 @@ function clean(value, fallback = "") {
 
 export function formatStatus(state, details = {}) {
   const label = clean(state, BotState.IDLE);
-  let line = `${ICONS[label] ?? "§7•"} ${label}`;
-  if (details.block) line += `: ${clean(details.block)}`;
-  else if (details.target) line += `: ${clean(details.target)}`;
+  const resource = clean(details.block || details.target || "").replace(/^minecraft:/, "").replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const specific = label === BotState.MINING && resource ? `MINING_${resource.toUpperCase().replace(/ /g, "_")}` : label;
+  let line = `${ICONS[label] ?? "§7•"} ${specific.replace(/_/g, " ")}`;
+  if (details.block && label !== BotState.MINING) line += `: ${resource}`;
+  else if (details.target && label !== BotState.MINING) line += `: ${clean(details.target)}`;
   if (details.progress) line += ` ${clean(details.progress)}`;
   if (details.distance !== undefined) line += ` §8(${Math.round(Number(details.distance))}m)`;
   return line;

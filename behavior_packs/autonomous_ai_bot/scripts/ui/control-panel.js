@@ -62,13 +62,13 @@ async function showSettings(player, agent) {
   const combatIndex = ["passive", "defend_owner", "hostile_mobs", "defend_self"].indexOf(config.combatMode);
   const form = new ModalFormData()
     .title(`${agent.name} settings`)
-    .dropdown("AI provider (network requires a host bridge)", ["Fallback", "Mideafire", "Custom API", "OpenAI-compatible"], Math.max(0, providerIndex))
-    .textField("Endpoint", "https://your-proxy.example/v1/plan", config.endpoint)
-    .textField("Model", "model-name", config.model)
-    .textField("Personality", "friendly", config.personality)
-    .dropdown("Combat mode", ["Passive", "Defend owner", "Hostile mobs", "Defend self"], Math.max(0, combatIndex))
-    .toggle("Allow named server commands", config.commandsEnabled)
-    .toggle("Debug mode", config.debug);
+    .dropdown("AI provider (network requires a host bridge)", ["Fallback", "Mideafire", "Custom API", "OpenAI-compatible"], { defaultValueIndex: Math.max(0, providerIndex) })
+    .textField("Endpoint", "https://your-proxy.example/v1/plan", { defaultValue: config.endpoint })
+    .textField("Model", "model-name", { defaultValue: config.model })
+    .textField("Personality", "friendly", { defaultValue: config.personality })
+    .dropdown("Combat mode", ["Passive", "Defend owner", "Hostile mobs", "Defend self"], { defaultValueIndex: Math.max(0, combatIndex) })
+    .toggle("Allow named server commands", { defaultValue: config.commandsEnabled })
+    .toggle("Debug mode", { defaultValue: config.debug });
   const response = await form.show(player);
   if (response.canceled || !response.formValues) return;
   const values = response.formValues;
@@ -83,7 +83,7 @@ async function showSettings(player, agent) {
 }
 
 export async function showCreateBot(player, controller) {
-  const form = new ModalFormData().title("Create AI Bot").textField("Bot name", "Steve", "Steve").toggle("Start following", true);
+  const form = new ModalFormData().title("Create AI Bot").textField("Bot name", "Steve", { defaultValue: "Steve" }).toggle("Start following", { defaultValue: true });
   const response = await form.show(player);
   if (response.canceled || !response.formValues) return;
   const result = controller.create(player, String(response.formValues[0] || "Steve"));

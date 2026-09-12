@@ -4,10 +4,10 @@ This repository contains a Bedrock add-on architecture for a player-like compani
 
 ## Target and compatibility
 
-- Bedrock / Pocket Edition **1.26.0 or newer** (the 2026 year-based version series).
-- `@minecraft/server` **2.5.0** — the version that shipped with Bedrock 26.0, so the script
-  module also loads on 26.10 / 26.20 / 26.30 / 26.40+.
-- `@minecraft/server-ui` **2.0.0** stable.
+- Minecraft Bedrock / Pocket Edition **26.40 or newer** (latest stable compatibility baseline checked on 2026-09-12).
+- `@minecraft/server` **2.9.0**, shipped stable with Bedrock 26.40.
+- `@minecraft/server-ui` **2.1.0** stable.
+- **No experiments are required.** Preview/beta modules are intentionally not used.
 
 > **Why this matters:** if a manifest declares a `@minecraft/server` version newer than the
 > game provides, Bedrock refuses to load the script module and does it **silently** — no
@@ -59,7 +59,7 @@ The workflow also uploads a **bedrock-mobile-modpack** artifact on the Actions r
 
 1. Make a copy of the world.
 2. Open `AI-Bot-Bedrock-Mobile.mcaddon` on the device and import it into Minecraft.
-3. Edit the world, activate both packs, and enable **Beta APIs / Script API experiments only if the target game build requires them**. The manifests target stable APIs; do not enable unrelated experiments.
+3. Edit the world and activate **Autonomous AI Bot - Behavior**. Its manifest dependency activates the matching resource pack. No experimental toggle is required.
 4. Enter the world and run the spawn command below.
 
 From the repository root, local packaging is:
@@ -143,7 +143,7 @@ That entity has no owner until it is recreated through `!aibot create`; owner-ga
 For `Steve, get me 32 oak logs`, the deterministic loop is:
 
 1. Parse the request into a bounded `collect` task.
-2. Scan a small local observation, find an allowlisted oak-log block and approach it with safe incremental steps.
+2. Scan a bounded local observation, find an allowlisted oak-log block, calculate local A* waypoints, and walk using physics impulses. Teleport is reserved for recovery after repeated stuck detection.
 3. Run a fixed `setblock <x> <y> <z> air destroy` operation, then verify the block changed.
 4. Collect only real nearby item entities into the 36-slot inventory.
 5. Count the actual inventory item, update persistent progress and find the next tree.
@@ -175,7 +175,7 @@ Work through this in order; the first line that is false is your cause.
 | You see the banner **only once** | Two banners with different versions (e.g. `v1.2.0` and `v1.3.x` at the same time) mean **two copies of the behavior pack are active on that world** — every command is handled twice by two separate scripts and you get doubled messages, two bots with the same name, and `No bot is assigned to you` from the copy that did not create your bot. Fix: *Edit World → Behavior Packs* and **deactivate the older "Autonomous AI Bot" pack**, then save and reload the world. Since v1.3.1 the pack also detects a second running copy automatically (both copies must be v1.3.1+) and prints a red `⚠ Two copies…` warning with these steps. |
 | You see **`No bot is assigned to you`** although a bot exists | Since v1.3.1 this heals itself: the bot's stored owner id is a runtime id that changes every session, so old builds lost track of the owner after a world reload. Update to v1.3.1+ and use `/aibot:status` — the bot is re-bound to you by name automatically. If it still fails, run `/aibot:info` and check the `Duplicate packs:` line. |
 | The join message says **`chat: unavailable`** | That is normal on Bedrock 26.x: Mojang removed chat script events from the stable API, so `!aibot …` typed in chat **cannot** work. Use `/aibot:create Steve` (custom slash command), the **compass** menu, or `/scriptevent aibot:cmd create Steve` with cheats on. |
-| `Settings → Profile` shows Bedrock **1.26.0+** | Update Minecraft. The pack cannot load on an older engine. |
+| `Settings → Profile` shows Bedrock **1.26.40+** | Update Minecraft. The pack cannot load on an older engine. |
 | Both **Autonomous AI Bot - Behavior** and **- Resources** are ACTIVE on that world | Activate them in *Edit World*, not just in global storage. |
 | You typed `/aibot:create` (namespaced, with the colon) | A bare `/aibot` has never existed as a slash command; every command is `/aibot:<action>`, e.g. `/aibot:create Steve`, `/aibot:help`. |
 | `/aibot:info` replies | If it replies but `create` fails, it prints the real spawn error (usually the behaviour pack is applied but the entity type is not registered — re-add the pack to the world). `/aibot:info` also prints the `Duplicate packs:` line — anything other than `none detected` means deactivate the older copy as above. |

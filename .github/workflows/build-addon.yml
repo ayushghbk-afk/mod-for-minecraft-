@@ -29,6 +29,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install Node dependencies
+        run: npm ci
+
       - name: Install zip
         run: sudo apt-get update -y && sudo apt-get install -y zip
 
@@ -77,6 +80,7 @@ jobs:
           set -euo pipefail
           ls -la dist
           test -f dist/AI-Bot-Bedrock-Mobile.mcaddon
+          test -f dist/Minecraft-Bot-Latest.mcaddon
           test -f dist/AI-Bot-Behavior.mcpack
           test -f dist/AI-Bot-Resources.mcpack
           TAG="bedrock-mobile-latest"
@@ -96,6 +100,7 @@ jobs:
           if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "$TAG" \
               dist/AI-Bot-Bedrock-Mobile.mcaddon \
+              dist/Minecraft-Bot-Latest.mcaddon \
               dist/AI-Bot-Behavior.mcpack \
               dist/AI-Bot-Resources.mcpack \
               dist/autonomous_ai_bot.mcaddon \
@@ -108,6 +113,7 @@ jobs:
           else
             gh release create "$TAG" \
               dist/AI-Bot-Bedrock-Mobile.mcaddon \
+              dist/Minecraft-Bot-Latest.mcaddon \
               dist/AI-Bot-Behavior.mcpack \
               dist/AI-Bot-Resources.mcpack \
               dist/autonomous_ai_bot.mcaddon \
@@ -121,6 +127,7 @@ jobs:
           fi
           echo "### Download" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [Minecraft-Bot-Latest.mcaddon](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Minecraft-Bot-Latest.mcaddon)" >> "$GITHUB_STEP_SUMMARY"
           echo "- [AI-Bot-Bedrock-Mobile.mcaddon](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/AI-Bot-Bedrock-Mobile.mcaddon)" >> "$GITHUB_STEP_SUMMARY"
           echo "- [AI-Bot-Behavior.mcpack](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/AI-Bot-Behavior.mcpack)" >> "$GITHUB_STEP_SUMMARY"
           echo "- [AI-Bot-Resources.mcpack](https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/AI-Bot-Resources.mcpack)" >> "$GITHUB_STEP_SUMMARY"

@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -14,12 +14,25 @@ function json(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+function files(directory) {
+  return readdirSync(directory).flatMap((name) => {
+    const path = join(directory, name);
+    return statSync(path).isDirectory() ? files(path) : [path];
+  });
+}
+
 function validatePack(pack) {
   const manifestPath = join(pack.directory, "manifest.json");
   if (!existsSync(manifestPath)) throw new Error(`Missing manifest: ${manifestPath}`);
+  for (const path of files(pack.directory).filter((value) => value.endsWith(".json"))) json(path);
   const manifest = json(manifestPath);
-  if (!manifest.header?.uuid || !Array.isArray(manifest.header?.version)) throw new Error(`Invalid header in ${manifestPath}`);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (manifest.format_version !== 2 || !uuid.test(manifest.header?.uuid || "") || !Array.isArray(manifest.header?.version) || !Array.isArray(manifest.header?.min_engine_version)) throw new Error(`Invalid header in ${manifestPath}`);
   if (!Array.isArray(manifest.modules) || manifest.modules.length === 0) throw new Error(`No modules in ${manifestPath}`);
+  for (const module of manifest.modules) {
+    if (!uuid.test(module.uuid || "")) throw new Error(`Invalid module UUID ${module.uuid} in ${manifestPath}`);
+    if (module.type === "script" && !existsSync(join(pack.directory, module.entry || ""))) throw new Error(`Missing script entry ${module.entry}`);
+  }
   if (!existsSync(join(pack.directory, "pack_icon.png"))) throw new Error(`Missing pack_icon.png in ${pack.directory}`);
   return manifest;
 }
@@ -41,20 +54,29 @@ function packagePack(pack) {
 rmSync(output, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
 const manifests = packs.map(validatePack);
+const allUuids = manifests.flatMap((manifest) => [manifest.header.uuid, ...manifest.modules.map((module) => module.uuid)]);
+if (new Set(allUuids).size !== allUuids.length) throw new Error("Duplicate pack/module UUID detected.");
+const [behaviorManifest, resourceManifest] = manifests;
+const resourceDependency = behaviorManifest.dependencies?.find((dependency) => dependency.uuid === resourceManifest.header.uuid);
+if (!resourceDependency || JSON.stringify(resourceDependency.version) !== JSON.stringify(resourceManifest.header.version)) throw new Error("Behavior pack must depend on the exact resource-pack UUID/version.");
 const packaged = packs.map(packagePack);
 const artifacts = packaged.flatMap((pack) => [pack.destination, pack.alias]);
 const addon = join(output, "autonomous_ai_bot.mcaddon");
 const mobileAddon = join(output, "AI-Bot-Bedrock-Mobile.mcaddon");
+const latestAddon = join(output, "Minecraft-Bot-Latest.mcaddon");
 execFileSync("zip", ["-q", "-X", addon, ...packaged.map((pack) => pack.destination.split(/[\\/]/).pop())], {
   cwd: output,
   stdio: "inherit"
 });
 copyFileSync(addon, mobileAddon);
-artifacts.push(addon, mobileAddon);
+copyFileSync(addon, latestAddon);
+artifacts.push(addon, mobileAddon, latestAddon);
 const buildInfo = {
   version: manifests[0].header.version.join("."),
   generatedAt: new Date().toISOString(),
-  target: "Bedrock / Pocket Edition / Android / iOS 1.26.0+",
+  target: "Minecraft Bedrock / Pocket Edition / Android / iOS 26.40+",
+  scriptModules: { "@minecraft/server": "2.9.0", "@minecraft/server-ui": "2.1.0" },
+  experimentsRequired: false,
   install: "Open AI-Bot-Bedrock-Mobile.mcaddon on a phone or desktop, then activate both packs in the world.",
   artifacts: artifacts.map((path) => path.replace(`${root}/`, ""))
 };

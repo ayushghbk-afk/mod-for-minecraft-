@@ -21,6 +21,7 @@ export class TaskManager {
     this.state.history = Array.isArray(this.state.history) ? this.state.history.slice(-20) : [];
   }
 
+  /** @param {{goal?: string, kind?: string, block?: string, target?: number, startingCount?: number, requiredItems?: string[]}} [input] */
   create({ goal, kind = "generic", block = "", target = 1, startingCount = 0, requiredItems = [] } = {}) {
     if (this.state.current) {
       if ([TaskStatus.ACTIVE, TaskStatus.PAUSED, TaskStatus.PENDING].includes(this.state.current.status)) this.pause("Replaced by a newer player request.");

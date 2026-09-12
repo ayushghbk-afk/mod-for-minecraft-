@@ -1,13 +1,25 @@
 import { ItemStack } from "@minecraft/server";
-import { addItem, consumeItem, countItem, equipItem, getContainer, itemStackFromEntity } from "./inventory.js";
+import { addItem, consumeItem, countItem, equipItem, getContainer, itemStackFromEntity, readInventory } from "./inventory.js";
 import { setBotStatus, BotState } from "./status.js";
 import { moveEntityTowards } from "./navigation.js";
 
 function blockAt(dimension, position) {
-  try { return dimension.getBlock({ x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) }); } catch { return null; }
+  try {
+    const value = Array.isArray(position) ? { x: position[0], y: position[1], z: position[2] } : position;
+    return dimension.getBlock({ x: Math.floor(value.x), y: Math.floor(value.y), z: Math.floor(value.z) });
+  } catch (error) { return null; }
 }
 function targetPosition(agent) { return agent.runtime.targetBlock || agent.runtime.targetPosition || null; }
 function hostile(typeId) { return String(typeId).includes("zombie") || String(typeId).includes("skeleton") || String(typeId).includes("creeper") || String(typeId).includes("spider") || String(typeId).includes("witch") || String(typeId).includes("enderman"); }
+function hasLineOfSight(dimension, from, to) {
+  const steps = Math.max(2, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z) * 2));
+  for (let index = 1; index < steps; index += 1) {
+    const t = index / steps;
+    const value = blockAt(dimension, { x: from.x + (to.x - from.x) * t, y: from.y + 1.2 + (to.y - from.y) * t, z: from.z + (to.z - from.z) * t });
+    if (value && !["minecraft:air", "minecraft:cave_air", "minecraft:void_air", "minecraft:short_grass", "minecraft:tall_grass"].includes(value.typeId)) return false;
+  }
+  return true;
+}
 
 export class ActionEngine {
   constructor(agent) { this.agent = agent; }
@@ -56,8 +68,8 @@ export class ActionEngine {
       setBotStatus(this.bot, BotState.SEARCHING, { target: action.block });
       return this.result(action, false, `No ${action.block} was found within the observation radius.`);
     }
-    const [x, y, z] = match.relative;
-    this.agent.runtime.targetBlock = { x: Math.floor(this.bot.location.x + x), y: Math.floor(this.bot.location.y + y), z: Math.floor(this.bot.location.z + z), type: action.block };
+    const [x, y, z] = match.position || match.relative.map((offset, index) => Math.floor([this.bot.location.x, this.bot.location.y, this.bot.location.z][index] + offset));
+    this.agent.runtime.targetBlock = { x, y, z, type: action.block };
     setBotStatus(this.bot, BotState.SEARCHING, { target: action.block, distance: match.distance });
     return this.result(action, true, "Target block located.", { target: this.agent.runtime.targetBlock });
   }
@@ -106,27 +118,42 @@ export class ActionEngine {
     const target = this.agent.runtime.targetBlock;
     if (!target) return this.result(action, false, "No target block is selected.");
     const block = blockAt(this.bot.dimension, target);
+    const key = `${target.x},${target.y},${target.z}`;
+    if (this.agent.runtime.lastMinedKey === key && block && ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"].includes(block.typeId)) {
+      this.agent.tasks.addAction(`mined ${action.block} at ${key}`);
+      this.agent.runtime.targetBlock = null;
+      return this.result(action, true, "Block change verified.");
+    }
     if (!block || block.typeId !== action.block) {
       this.agent.runtime.targetBlock = null;
       return this.result(action, false, `Target is no longer ${action.block}.`);
     }
     const distance = Math.hypot(this.bot.location.x - target.x, this.bot.location.y - target.y, this.bot.location.z - target.z);
     if (distance > 5) return this.result(action, false, "Target is unreachable from the current position.");
-    setBotStatus(this.bot, BotState.MINING, { block: action.block, progress: `${countItem(this.bot, action.block.replace("_ore", ""))} collected` });
-    const key = `${target.x},${target.y},${target.z}`;
-    if (this.agent.runtime.lastMinedKey !== key || this.agent.runtime.lastMinedAt < Date.now() - 900) {
-      // The stable API has no breakBlock call. This is a fixed, allowlisted
-      // setblock destroy operation; the block is verified below and drops are
-      // collected only from real item entities.
+    const axeBlock = /_log$/.test(action.block);
+    const toolCandidates = axeBlock
+      ? ["minecraft:netherite_axe", "minecraft:diamond_axe", "minecraft:iron_axe", "minecraft:stone_axe", "minecraft:wooden_axe"]
+      : ["minecraft:netherite_pickaxe", "minecraft:diamond_pickaxe", "minecraft:iron_pickaxe", "minecraft:stone_pickaxe", "minecraft:wooden_pickaxe"];
+    const inventory = readInventory(this.bot);
+    if (!toolCandidates.includes(inventory.selectedItem?.id)) {
+      const available = toolCandidates.find((id) => countItem(this.bot, id) > 0);
+      if (available) equipItem(this.bot, available);
+    }
+    const equipped = readInventory(this.bot).selectedItem?.id || "empty hand";
+    if (/diamond_ore|gold_ore|redstone_ore/.test(action.block) && !/iron_pickaxe|diamond_pickaxe|netherite_pickaxe/.test(equipped)) return this.result(action, false, `A suitable iron-tier pickaxe is required for ${action.block}.`);
+    if (/iron_ore/.test(action.block) && !/stone_pickaxe|iron_pickaxe|diamond_pickaxe|netherite_pickaxe/.test(equipped)) return this.result(action, false, `A stone-tier pickaxe is required for ${action.block}.`);
+    setBotStatus(this.bot, BotState.MINING, { block: action.block, progress: this.agent.progressText() });
+    if (this.agent.runtime.lastMinedKey !== key) {
+      // Stable Script API has no custom-mob breakBlock call. This is a fixed,
+      // allowlisted operation; later ticks verify the block and real drop.
       this.bot.dimension.runCommand(`setblock ${target.x} ${target.y} ${target.z} air destroy`);
       this.agent.runtime.lastMinedKey = key;
       this.agent.runtime.lastMinedAt = Date.now();
       return this.result(action, false, "Mining started; waiting for block verification.", { pending: true });
     }
-    const after = blockAt(this.bot.dimension, target);
-    if (after && after.typeId !== "minecraft:air" && after.typeId !== "minecraft:cave_air") return this.result(action, false, "Mining did not change the target block.");
-    this.agent.tasks.addAction(`mined ${action.block} at ${key}`);
-    return this.result(action, true, "Block change verified.");
+    if (Date.now() - this.agent.runtime.lastMinedAt < 1200) return this.result(action, false, "Waiting for block-state verification.", { pending: true });
+    this.agent.runtime.targetBlock = null;
+    return this.result(action, false, "Mining command completed but the block did not change.");
   }
 
   collectItem(action) {
@@ -190,8 +217,9 @@ export class ActionEngine {
         setBotStatus(this.bot, BotState.ATTACKING, { target: target.typeId, distance });
         return this.result(action, false, movement.success ? "Closing on hostile target." : movement.reason, { pending: true });
       }
+      if (!hasLineOfSight(this.bot.dimension, this.bot.location, target.location)) return this.result(action, false, "A solid block obstructs the attack; repositioning is required.");
       if (!this.agent.runtime.lastAttackAt || Date.now() - this.agent.runtime.lastAttackAt > 650) {
-        target.applyDamage(4);
+        target.applyDamage(4, { damagingEntity: this.bot });
         this.agent.runtime.lastAttackAt = Date.now();
       }
       setBotStatus(this.bot, BotState.ATTACKING, { target: target.typeId, distance: Math.round(distance * 10) / 10 });
@@ -245,8 +273,7 @@ export class ActionEngine {
     this.bot.dimension.runCommand(`setblock ${action.position[0]} ${action.position[1]} ${action.position[2]} ${action.block} replace`);
     const placed = blockAt(this.bot.dimension, action.position);
     if (!placed || placed.typeId !== action.block) return this.result(action, false, "Block placement was not verified.");
-    consumeItem(this.bot, action.block, 1);
-    consumeItem(this.bot, item, 1);
+    consumeItem(this.bot, countItem(this.bot, action.block) > 0 ? action.block : item, 1);
     setBotStatus(this.bot, BotState.BUILDING, { target: action.block });
     return this.result(action, true, "Block placement verified.");
   }

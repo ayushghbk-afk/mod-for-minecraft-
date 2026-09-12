@@ -83,7 +83,7 @@ export class Entity {
       ["minecraft:equippable", new EquippableComponent()]
     ]);
   }
-  isValid() { return !this.removed; }
+  get isValid() { return !this.removed; }
   getComponent(id) { return this.components.get(id); }
   hasComponent(id) { return this.components.has(id); }
   getDynamicProperty(key) { return this.properties.get(key); }
@@ -94,7 +94,10 @@ export class Entity {
   removeTag(tag) { return this.tags.delete(tag); }
   getTags() { return [...this.tags]; }
   teleport(location) { this.location = { ...location }; }
+  clearVelocity() { this.velocity = { x: 0, y: 0, z: 0 }; }
+  applyImpulse(value) { this.velocity = { ...value }; this.location = { x: this.location.x + value.x, y: this.location.y + value.y, z: this.location.z + value.z }; }
   applyDamage() { return true; }
+  addEffect() { return undefined; }
   remove() { this.removed = true; }
   kill() { this.removed = true; }
   sendMessage(text) { this.sentMessages.push(text); }
@@ -108,13 +111,14 @@ export class Player extends Entity {
     this.nameTag = name;
     this.selectedSlotIndex = 0;
   }
+  getGameMode() { return "Survival"; }
 }
 
 class Block {
   constructor(location, typeId) { this.location = location; this.typeId = typeId; }
   get permutation() { return { type: { id: this.typeId } }; }
   isAir() { return this.typeId === "minecraft:air"; }
-  isValid() { return true; }
+  get isValid() { return true; }
 }
 
 const KNOWN_ENTITY_TYPES = new Set(["aibot:companion", "minecraft:item", "minecraft:zombie"]);
@@ -146,9 +150,9 @@ export class Dimension {
     return entity;
   }
   getEntities(filter = {}) {
-    return this.entities.filter((entity) => entity.isValid() && (!filter.type || entity.typeId === filter.type));
+    return this.entities.filter((entity) => entity.isValid && (!filter.type || entity.typeId === filter.type));
   }
-  getPlayers() { return this.entities.filter((entity) => entity.typeId === "minecraft:player" && entity.isValid()); }
+  getPlayers() { return this.entities.filter((entity) => entity.typeId === "minecraft:player" && entity.isValid); }
   runCommand(command) { this.commands.push(command); return { successCount: 1 }; }
 }
 
