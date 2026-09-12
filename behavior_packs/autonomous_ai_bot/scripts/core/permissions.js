@@ -3,7 +3,14 @@ export const NEVER_ALLOWED_COMMANDS = Object.freeze(new Set(["op", "deop", "stop
 
 export function canUseBot(player, agent, config) {
   if (!agent || !player) return false;
-  if (config.ownerOnly !== false && agent.ownerId && agent.ownerId !== player.id) return false;
+  // The stored owner id is a RUNTIME entity id: it is not guaranteed to match
+  // after a world reload, because runtime ids are re-assigned every session
+  // (the stable cross-session Player.persistentId is still pre-release and not
+  // available on the @minecraft/server version this pack targets). The owner
+  // NAME is stored next to it and is stable, so it must be accepted here too —
+  // otherwise a returning owner is told "No bot is assigned to you" forever,
+  // exactly like forPlayer() and owner() already handle it.
+  if (config.ownerOnly !== false && agent.ownerId && agent.ownerId !== player.id && agent.ownerName !== player.name) return false;
   return true;
 }
 

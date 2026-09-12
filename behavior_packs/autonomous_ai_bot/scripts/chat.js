@@ -1,10 +1,12 @@
 import { parseBotCommand, parseIntent } from "./core/intent-parser.js";
 import { showControlPanel, showCreateBot } from "./ui/control-panel.js";
 import { SCRIPT_VERSION } from "./core/version.js";
+import { chatAvailable, commandHint, talkHint, noBotMessage } from "./core/hints.js";
 
-function help(player) {
-  player.sendMessage([
+function help(player, controller) {
+  const lines = [
     "§bAI Bot commands§r §8(v" + SCRIPT_VERSION + ")",
+    `§e${commandHint(controller, "create Steve")}§r — create your bot`,
     "§e/aibot:create Steve§r — §fslash command§r, works on every current build (no cheats needed)",
     "§e!aibot create Steve§r — chat form, only on builds where chat events exist",
     "§e/aibot:panel§r §8(or §e!aibot panel§8§r) — status, tasks, inventory and settings",
@@ -13,11 +15,16 @@ function help(player) {
     "Natural language also works in chat: §fSteve, get me 32 oak logs§r.",
     "No chat on your build? Hold a §fcompass§r and use it — the menu needs no commands.",
     "Server commands stay disabled by default (§e!aibot allow on§r)."
-  ].join("\n"));
+  ];
+  if (chatAvailable(controller)) {
+    lines.push("§7Seeing two \"[AI Bot …] Script loaded\" banners? Two copies of this pack are active —§r");
+    lines.push("§7deactivate the older AI Bot behavior pack in this world's settings, then reload the world.§r");
+  }
+  player.sendMessage(lines.join("\n"));
 }
 
 function reportCreate(player, result, name) {
-  if (result?.created) return true;
+  if (result?.created || result?.reclaimed) return true;
   const reason = result?.reason || `${name} could not be created.`;
   player.sendMessage(`§c[AI Bot] ${reason}§r`);
   if (!result?.agent) player.sendMessage("§eDiagnostics: §f/aibot:info§e (or §f!aibot info§e). If this message never appears, the script is not loading — re-import the .mcaddon and re-activate the behavior pack on this world.§r");
@@ -28,7 +35,7 @@ export async function handleChat(player, message, controller) {
   const command = parseBotCommand(message);
   if (command) {
     switch (command.command) {
-      case "help": help(player); return true;
+      case "help": help(player, controller); return true;
       case "create":
       case "spawn":
       case "new": {
@@ -36,7 +43,7 @@ export async function handleChat(player, message, controller) {
         reportCreate(player, controller.create(player, name), name);
         return true;
       }
-      case "list": player.sendMessage(controller.names().join(", ") || "No AI bots are loaded. Use §e!aibot create Steve§r."); return true;
+      case "list": player.sendMessage(controller.names().join(", ") || noBotMessage(controller)); return true;
       case "info":
       case "diag":
       case "diagnostics":
@@ -49,32 +56,32 @@ export async function handleChat(player, message, controller) {
       case "inventory": player.sendMessage(controller.inventory(player, command.args.join(" "))); return true;
       case "follow": {
         const agent = controller.forPlayer(player, command.args.join(" "));
-        if (agent) agent.follow(); else player.sendMessage("§eNo bot is assigned to you.");
+        if (agent) agent.follow(); else player.sendMessage(noBotMessage(controller));
         return true;
       }
       case "stop": {
         const agent = controller.forPlayer(player, command.args.join(" "));
-        if (agent) agent.stop(); else player.sendMessage("§eNo bot is assigned to you.");
+        if (agent) agent.stop(); else player.sendMessage(noBotMessage(controller));
         return true;
       }
       case "return": {
         const agent = controller.forPlayer(player, command.args.join(" "));
-        if (agent) agent.returnHome(); else player.sendMessage("§eNo bot is assigned to you.");
+        if (agent) agent.returnHome(); else player.sendMessage(noBotMessage(controller));
         return true;
       }
       case "protect": {
         const agent = controller.forPlayer(player, command.args.join(" "));
-        if (agent) agent.protect(); else player.sendMessage("§eNo bot is assigned to you.");
+        if (agent) agent.protect(); else player.sendMessage(noBotMessage(controller));
         return true;
       }
       case "cancel": {
         const agent = controller.forPlayer(player, command.args.join(" "));
-        if (agent) agent.cancel(); else player.sendMessage("§eNo bot is assigned to you.");
+        if (agent) agent.cancel(); else player.sendMessage(noBotMessage(controller));
         return true;
       }
       case "resume": {
         const agent = controller.forPlayer(player, command.args.join(" "));
-        if (agent) agent.resume(); else player.sendMessage("§eNo bot is assigned to you.");
+        if (agent) agent.resume(); else player.sendMessage(noBotMessage(controller));
         return true;
       }
       case "allow": {
@@ -92,7 +99,7 @@ export async function handleChat(player, message, controller) {
       case "command": player.sendMessage(controller.runNamedCommand(player, command.args[0], command.args.slice(1))); return true;
       default:
         player.sendMessage(`§eUnknown AI Bot command "§f${command.command}§e".§r`);
-        help(player);
+        help(player, controller);
         return true;
     }
   }
@@ -115,7 +122,7 @@ export async function handleChat(player, message, controller) {
     case "status": player.sendMessage(agent.statusText()); break;
     case "collect": agent.createCollectTask(intent.block, intent.count, intent.goal); break;
     case "build": player.sendMessage("§eBuilding is intentionally not auto-created from chat yet; use an explicit validated build plan."); break;
-    default: player.sendMessage(`Try "${agent.name}, follow me", "${agent.name}, get me 20 iron", or "!aibot panel".`);
+    default: player.sendMessage(`Try "${agent.name}, follow me", "${agent.name}, get me 20 iron", or "${commandHint(controller, "panel")}".`);
   }
   return true;
 }

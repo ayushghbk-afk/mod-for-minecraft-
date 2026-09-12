@@ -47,7 +47,10 @@ test("the same chat message never creates two bots", () => {
   const replies = bedrock.command(player, "!aibot create Dupbot");
   assert.equal(replies.length, 1);
   const second = bedrock.command(player, "!aibot create Dupbot");
-  assert.match(second[0], /already exists/);
+  // Re-running create with your own existing bot hands it back instead of
+  // scolding the player with "already exists" — that message is what made
+  // rejoining players think the mod was broken.
+  assert.match(second[0], /already at your side/);
   assert.equal(globalThis.__aibotController.names().filter((name) => name === "Dupbot").length, 1);
 });
 

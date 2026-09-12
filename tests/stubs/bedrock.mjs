@@ -276,3 +276,22 @@ export function setEntityRegistered(registered) {
   if (registered) KNOWN_ENTITY_TYPES.add("aibot:companion");
   else KNOWN_ENTITY_TYPES.delete("aibot:companion");
 }
+
+/**
+ * Turn world dynamic properties on, like a real Bedrock device. The Node
+ * world starts WITHOUT them so main.js's isRealBedrock() probe stays false in
+ * files that do not opt in — files that test heartbeats / persistence call
+ * this before driving the script. Setting undefined clears the property, the
+ * same way the real API behaves.
+ */
+export function enableWorldProperties() {
+  const properties = new Map();
+  world.properties = properties;
+  world.getDynamicProperty = (id) => properties.get(id);
+  world.setDynamicProperty = (id, value) => {
+    if (value === undefined) properties.delete(id);
+    else properties.set(id, value);
+  };
+  world.getDynamicPropertyIds = () => [...properties.keys()];
+  return world;
+}
