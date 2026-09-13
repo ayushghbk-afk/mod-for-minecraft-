@@ -95,6 +95,7 @@ jobs:
           - `AI-Bot-Resources.mcpack`
 
           In-game: run `/aibot:create Steve` (slash command, no cheats needed), then `/aibot:help`. On builds where chat events exist, `!aibot create Steve` in chat also works.
+          If nothing happens: run `/aibot:debug on` (every error the pack catches is printed in chat) and then `/aibot:test` (checks entity registration, packs, movement, mining, persistence and the AI endpoint, and prints the fix for each failure).
           EOF
           )"
           if gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then

@@ -18,7 +18,21 @@ ActionEngine
 navigation.js + inventory.js + fixed verified operations
         ↓
 status.js / persistence / chat
+        ↘
+         testmode.js (error log + chat echo) → selftest.js (the /aibot:test check-up)
 ```
+
+`testmode.js` is the pack's own diagnostic plane. Every `catch` that used to be silent goes
+through `testMode.error/warn/note` (or `guard`/`guardAsync`), which keeps a bounded 30-entry
+log in the `aibot:testlog` world dynamic property, echoes new entries to every player while
+`/aibot:debug on` is set (`aibot:testmode`), folds repeats of the same signature into `×N`,
+and measures whether the AI and movement interval jobs are still beating — a script that
+loaded but never ticks is otherwise indistinguishable from one that never loaded. Failures
+that make the whole pack look dead are echoed even when test mode is off (`{ always: true }`).
+`selftest.js` is only reachable through it and must never import back into it (Bedrock
+resolves a cycle to `undefined` on first evaluation), which is why `sendLines`/`describe`
+live in `format.js`. `BotController.test` defaults to `SILENT_TEST`, whose `guard()` *runs*
+the callback, so agents behave identically with or without the harness attached.
 
 The AI decides a bounded plan. `ActionEngine` decides how an action is carried out, checks game state and returns `{ success, reason }`. A failed or missing provider never bypasses the engine.
 
@@ -50,6 +64,15 @@ command path testable outside Bedrock, so it asserts that:
 - `/aibot:info` reports the bound chat signal, slash-command registration, tick loop and entity counts;
 - `/aibot:remove` frees a name for re-creation;
 - a failed `spawnEntity` produces an actionable error instead of silence.
+
+`tests/testmode.test.mjs` covers the diagnostic plane itself: errors are recorded with test
+mode off and echoed with it on; 25 identical failures become one chat line plus `×25`; the
+per-agent tick guard keeps a healthy bot ticking while a throwing one is reported once; the
+flag and the log survive a reload; the liveness sampler reports a stalled AI/movement loop;
+the self-test turns a chat-less build, an unregistered entity and a refused `registerCommand`
+into named failures with fixes (each also written to the log); the report is chunked so
+Bedrock cannot truncate it; the probe entity is never adopted as a real bot; and the network
+check is opt-in, quoting the endpoint's own error verbatim.
 
 The stub is test-only and lives outside `behavior_packs/`, so it is never packaged into the
 `.mcpack`. It requires Node **22.15+** (`module.registerHooks`); `npm test` is the same command
@@ -85,6 +108,12 @@ Run in a disposable Bedrock 1.26.40+ world after importing both packs:
 0. Confirm the cyan `[AI Bot v…] Script loaded` join message and that `/aibot:info` replies;
    without those, nothing else can work. Verify the message's `chat:` note matches reality and
    that `/aibot:create Steve` spawns a bot even when chat is unavailable.
+0b. Run **`/aibot:debug on`** then **`/aibot:test`**: every check must be `✔ pass` or an
+   explained `▲`; `/aibot:debug status` must show the AI and movement loops non-stalled;
+   answer the "do you see the probe?" dialog (✔ with a body / ✖ name only = resource pack);
+   run `/aibot:test net` with a proxy reachable and confirm the round-trip line quotes the
+   HTTP status. Then reload the world and confirm `/aibot:debug log` still shows the earlier
+   entries (the log lives in a world dynamic property on purpose).
 1. Create, despawn and recreate a bot; verify model, name tag, health and collision.
 2. Run `/aibot:follow`, walk over uneven terrain, run `/aibot:stop`, and check bounded movement/stuck recovery.
 3. Place oak logs and dropped items nearby. Run `Steve, get me 2 oak logs`; verify the block actually changes, item entities are picked up, inventory count increases, task reaches `2/2`, and the bot returns.
@@ -95,6 +124,9 @@ Run in a disposable Bedrock 1.26.40+ world after importing both packs:
 8. Test owner and non-owner chat, command OFF, allowlist ON, and permanent deny commands.
 9. Open the control panel and verify settings, task history, memory and inventory reflect actual entity state.
 10. Spawn two named bots with two owners and confirm identity/task/memory/inventory separation.
+11. Break something on purpose (deactivate the resource pack; disable cheats) and confirm
+    `/aibot:test` points at exactly that, and that `/aibot:debug log` carries the game's own
+    error string rather than a paraphrase.
 
 ## Genuine API limitations
 

@@ -100,7 +100,10 @@ test("a failed spawn reports a real reason instead of staying silent", () => {
     const replies = bedrock.command(player, "!aibot create Nobody");
     assert.match(replies[0], /Could not spawn aibot:companion/);
     assert.match(replies[0], /entity definition itself was rejected/);
-    assert.match(replies[1], /!aibot info/);
+    assert.match(replies[1], /\/aibot:test/, "a spawn failure must point at the check-up, not at a chat command this build may not have");
+    // …and the raw game error is kept in the log, where the friendly chat
+    // summary above cannot fit it.
+    assert.match(globalThis.__aibotController.test.logLines(3).join("\n"), /Unknown entity type/);
   } finally {
     bedrock.setEntityRegistered(true);
   }
@@ -128,7 +131,7 @@ test("custom slash commands register alongside chat and /aibot:create works", ()
   };
   bedrock.fireStartup(registry);
 
-  assert.equal(registrations.size, 14, "slash commands must register even when chat also works");
+  assert.equal(registrations.size, 16, "slash commands must register even when chat also works");
   const player = bedrock.addPlayer("Slasher");
   const result = registrations.get("aibot:create").callback({ sourceEntity: player }, "Slashy");
   assert.equal(result.status, bedrock.CustomCommandStatus.Success);

@@ -168,3 +168,51 @@ Tests: three new regression tests (unreachable-target behaviour incl. no
 teleport + throttled replans + recovery when a gap opens; collect_item fast
 fail on an unreachable drop; eating only applies valid Bedrock effects and
 restores the previous main-hand item). Pack/script version bumped to 2.2.1.
+## v2.3.0 — the pack has to diagnose itself
+
+The reports this pack keeps getting are not "the code is wrong" but **"nothing happens and
+nothing is printed"**. That is a tooling gap, not a logic bug: the target API has no content
+log on mobile, and the codebase had ~40 `catch` blocks whose comments promised the failure was
+harmless ("entity unloading", "optional", "best effort") while giving no way to prove it. The
+bot tick loop, the movement step, mining, the provider request and even `spawnEntity` could
+each throw every tick and the player would see a silent mod.
+
+Added in v2.3.0, all of it reachable without chat, without commands and without cheats:
+
+- **Test mode** (`core/testmode.js`): `/aibot:debug on|log|watch|clear|status|off`. Every
+  caught error goes to a bounded 30-entry log stored in the `aibot:testlog` world dynamic
+  property (so it survives a reload and exists before anyone joins), and while test mode is on
+  each new one is echoed to every player. Repeats of the same signature fold into `×N` with a
+  20 s echo cooldown and at most 6 chat lines per flush, because a per-tick failure must not
+  become a chat flood. "Dead-mod-shaped" failures (spawn rejected, restore failed, tick loop
+  stalled, command registration refused) are echoed even with test mode off.
+- **Measured liveness** instead of assumptions: `main.js` beats once per AI loop and once per
+  movement step; the sampler runs on its own interval and reports a stalled loop, plus
+  measured ticks/second. "Script loaded but frozen" now has a line of its own.
+- **The self-test** (`core/selftest.js`): `/aibot:test`, 20+ checks across six groups (loading,
+  commands, world & pack, your bot, movement & mining, AI provider). Each check calls the same
+  API the bot calls — a real `spawnEntity` probe, a real `findLocalRoute` from the bot to the
+  owner, a real `runCommand` permission probe, a real world-property round-trip — so a failing
+  check is a failure the bot hits too. Every failure carries a fix, is written to the error
+  log, and the report is chunked because Bedrock truncates long chat messages.
+  `/aibot:test net` adds one real request to the configured endpoint and quotes the HTTP
+  answer verbatim; the default run never touches the network.
+- **The one question a script cannot answer for itself**: the check-up spawns a probe entity,
+  asks *"do you see it?"* through a form, and turns "name tag but no body" into
+  `✖ visible model → the resource pack is not active`, versus `✖ … did not appear at all` for
+  a client that is rendering a stale copy. The probe is explicitly excluded from bot
+  auto-registration (`controller.probe.suppressAutoRegister`) so it can never become a phantom
+  bot in `/aibot:list`.
+- **Per-agent isolation**: one throwing bot used to stop the AI loop for every bot in the world
+  (a single `try` around the whole loop). Each agent is now guarded individually, a failing
+  agent is reported once per second of failures instead of per tick, and its healthy neighbours
+  keep running. The `follow_player` verdict — the difference between "Following you" and a bot
+  that stands still — is kept on the agent and shown in `/aibot:status`.
+- **Capability-honest wording**: a missing `chatSend` is a `▲` warning when `/aibot:*` or the
+  compass menu still works, and only a `✖` failure when *no* input path exists; the create
+  confirmation stopped naming the same follow command twice.
+
+No gameplay rule, action validator, movement tuning or manifest dependency changed; the API
+floor stays `@minecraft/server` 2.9.0 / `@minecraft/server-ui` 2.1.0 on Bedrock 26.40+, and the
+harness degrades to a `SILENT_TEST` no-op whose `guard()` still runs the callback, so agents
+behave identically with or without it. Pack/script version bumped to 2.3.0.
