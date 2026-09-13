@@ -155,11 +155,13 @@ export function useItem(entity, typeId, options = {}) {
     const eaten = consumeItem(entity, id, 1);
     if (!eaten.success) return { success: false, reason: "Could not consume food." };
     try {
-      const amplifier = food?.[2] ?? 0;
+      const amplifier = Number(food?.[2] ?? 0);
+      const heal = Number(food?.[1] ?? 4);
       entity.addEffect("regeneration", 60 + (amplifier * 40), { amplifier, showParticles: true });
       entity.addEffect("saturation", 10, { amplifier: 0, showParticles: false });
+      return { success: true, used: id, kind: "food", healed: heal };
     } catch { /* effect optional */ }
-    return { success: true, used: id, kind: "food", healed: food?.[1] || 4 };
+    return { success: true, used: id, kind: "food", healed: Number(food?.[1] ?? 4) };
   }
 
   if (id === "minecraft:torch" || id === "minecraft:soul_torch") {
