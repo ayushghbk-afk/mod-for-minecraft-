@@ -52,9 +52,12 @@ test("all /aibot:* slash commands register with a valid, non-cheating schema", (
   const registry = makeRegistry();
   bedrock.fireStartup(registry);
 
-  assert.equal(registry.registrations.size, 16, "every documented action needs a slash command");
+  // 23 documented actions, each registered twice: the primary `aibot:` namespace
+  // and the short `bot:` alias the acceptance criteria (AC-33..AC-37) are written
+  // against, so `/bot stop` works exactly like `/aibot:stop`.
+  assert.equal(registry.registrations.size, 46, "every documented action needs a slash command, plus its short alias");
   for (const [name, { spec }] of registry.registrations) {
-    assert.match(name, /^aibot:[a-z]+$/, `${name} must be namespaced or the game rejects it`);
+    assert.match(name, /^(aibot|bot):[a-z]+$/, `${name} must be namespaced or the game rejects it`);
     assert.equal(spec.permissionLevel, bedrock.CommandPermissionLevel.Any, `${name} must be usable by any player`);
     assert.equal(spec.cheatsRequired, false, `${name} must work in worlds without cheats`);
     for (const parameter of spec.optionalParameters ?? []) {
@@ -66,7 +69,13 @@ test("all /aibot:* slash commands register with a valid, non-cheating schema", (
   assert.ok(registry.registrations.has("aibot:panel"));
   assert.ok(registry.registrations.has("aibot:debug"), "test mode must be reachable without chat");
   assert.ok(registry.registrations.has("aibot:test"), "the self-test must be reachable without chat");
-  assert.match(globalThis.__aibotController.diagnostics.slashCommands, /16\/16 registered/);
+  // AC-33..AC-37: the commands the acceptance criteria name literally.
+  for (const action of ["stop", "status", "follow", "come", "inventory", "mine", "collect", "task", "say", "acceptance"]) {
+    assert.ok(registry.registrations.has(`bot:${action}`), `/bot:${action} is the spelling the acceptance criteria use`);
+    assert.ok(registry.registrations.has(`aibot:${action}`), `/aibot:${action} is the primary spelling`);
+  }
+  assert.match(globalThis.__aibotController.diagnostics.slashCommands, /23\/23 registered/);
+  assert.match(globalThis.__aibotController.diagnostics.aliasCommands, /23\/23 registered as \/bot:\*/);
 });
 
 test("/aibot:create Slashbot spawns a real owner-bound bot without any chat", () => {

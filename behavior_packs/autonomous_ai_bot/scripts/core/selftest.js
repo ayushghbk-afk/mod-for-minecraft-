@@ -24,7 +24,7 @@ import * as MinecraftServer from "@minecraft/server";
 import { ActionFormData } from "@minecraft/server-ui";
 import { SCRIPT_VERSION } from "./version.js";
 import { describe, sendLines, tryRun } from "./format.js";
-import { distance as vectorDistance, findLocalRoute, isSafeCell } from "./navigation.js";
+import { distance as vectorDistance, findLocalRoute, isSafeCell, routeIsArrival } from "./navigation.js";
 import { readBotStatus } from "./status.js";
 import { createFetchTransport } from "./ai-provider.js";
 
@@ -350,6 +350,7 @@ export async function runSelfTest(options = {}) {
         if (owner && distanceToOwner > 2.5) {
           const route = tryRun(() => findLocalRoute(entity.dimension, entity.location, owner.location, { maxNodes: 160, maxRadius: 18 }), null);
           if (!Array.isArray(route)) report.fail("bot", `${entry.name}: route`, "pathfinding threw while routing to you", "unloaded chunks or a dimension the script cannot read; walk to the bot and run this again");
+          else if (routeIsArrival(route)) report.pass("bot", `${entry.name}: route`, "already standing next to you");
           else if (route.length === 0) report.fail("bot", `${entry.name}: route`, `no walkable path from the bot to you (${distanceToOwner}m apart)`, "the bot never teleports by design: clear a path or come closer. Walls taller than one block and 2-block drops are the usual blockers");
           else report.pass("bot", `${entry.name}: route`, `${route.length} waypoint(s) to you`);
         }

@@ -116,7 +116,13 @@ test("natural language still reaches the owner-bound bot", () => {
   const replies = bedrock.command(player, "Steve, follow me");
   assert.match(replies[0], /Following you/);
   const status = bedrock.command(player, "!aibot status");
-  assert.match(status[0], /Status: FOLLOWING/);
+  // AC-34: status must show state, task, progress, health and the priority that
+  // won — not just a state word.
+  assert.match(status[0], /State: FOLLOWING/);
+  assert.match(status[0], /Task: None/);
+  assert.match(status[0], /Progress: -/);
+  assert.match(status[0], /Health: \d+\/\d+/);
+  assert.match(status[0], /Priority: FOLLOW → follow/);
 });
 
 test("custom slash commands register alongside chat and /aibot:create works", () => {
@@ -131,7 +137,7 @@ test("custom slash commands register alongside chat and /aibot:create works", ()
   };
   bedrock.fireStartup(registry);
 
-  assert.equal(registrations.size, 16, "slash commands must register even when chat also works");
+  assert.equal(registrations.size, 46, "slash commands must register even when chat also works (23 actions × aibot:/bot:)");
   const player = bedrock.addPlayer("Slasher");
   const result = registrations.get("aibot:create").callback({ sourceEntity: player }, "Slashy");
   assert.equal(result.status, bedrock.CustomCommandStatus.Success);

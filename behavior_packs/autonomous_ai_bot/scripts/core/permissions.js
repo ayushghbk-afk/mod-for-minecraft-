@@ -10,8 +10,23 @@ export function canUseBot(player, agent, config) {
   // NAME is stored next to it and is stable, so it must be accepted here too —
   // otherwise a returning owner is told "No bot is assigned to you" forever,
   // exactly like forPlayer() and owner() already handle it.
-  if (config.ownerOnly !== false && agent.ownerId && agent.ownerId !== player.id && agent.ownerName !== player.name) return false;
-  return true;
+  if (config.ownerOnly === false) return true;
+  const ownerRecorded = Boolean(agent.ownerId || agent.ownerName);
+  // A bot with no owner recorded at all (bad restore, entity summoned by hand)
+  // used to fall through to `true` here, so the FIRST player to address it
+  // could command someone else's companion — and lookupForPlayer() would keep
+  // handing it back. Unowned means uncommandable, not up for grabs.
+  if (!ownerRecorded) return false;
+  // The stored owner id is a RUNTIME entity id: it is not guaranteed to match
+  // after a world reload, because runtime ids are re-assigned every session
+  // (the stable cross-session Player.persistentId is still pre-release and not
+  // available on the @minecraft/server version this pack targets). The owner
+  // NAME is stored next to it and is stable, so it must be accepted here too —
+  // otherwise a returning owner is told "No bot is assigned to you" forever,
+  // exactly like forPlayer() and owner() already handle it.
+  if (agent.ownerId && agent.ownerId === player.id) return true;
+  if (agent.ownerName && agent.ownerName === player.name) return true;
+  return false;
 }
 
 /**

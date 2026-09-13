@@ -1,17 +1,19 @@
 {
   "name": "autonomous-minecraft-ai-bot",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "typecheck": "tsc -p jsconfig.json",
     "validate": "npm run typecheck && npm test",
-    "build": "npm run validate && node scripts/package.mjs"
+    "build": "npm run validate && node scripts/package.mjs",
+    "acceptance": "node --test tests/acceptance.test.mjs"
   },
   "imports": {
     "#stub/bedrock": "./tests/stubs/bedrock.mjs",
-    "#stub/bedrock-ui": "./tests/stubs/bedrock-ui.mjs"
+    "#stub/bedrock-ui": "./tests/stubs/bedrock-ui.mjs",
+    "#stub/world-sim": "./tests/stubs/world-sim.mjs"
   },
   "engines": {
     "node": ">=22.15"

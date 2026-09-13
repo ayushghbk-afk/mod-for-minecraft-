@@ -28,6 +28,7 @@ import { system, world } from "@minecraft/server";
 import { SCRIPT_VERSION } from "./version.js";
 import { describe, levelColour, sendLines, tryRun } from "./format.js";
 import { runSelfTest } from "./selftest.js";
+import { printManualSteps, runAcceptance } from "./acceptance.js";
 
 // Re-exported so callers (and tests) can import the output helpers from either
 // module; the definitions live in format.js to keep the import graph acyclic.
@@ -412,6 +413,13 @@ export class TestMode {
       case "net":
       case "ping":
         return this.runSelfTest(player, controller, { deep: true, only: "network" });
+      // The gameplay acceptance run (AC-01..AC-44). Probes that touch the world
+      // are opt-in by name: `mine` places and breaks one stone block, `move`
+      // follows the player for six seconds and measures the distance closed.
+      case "acceptance":
+      case "ac":
+      case "accept":
+        return this.runAcceptance(player, controller, args);
       case "help":
       case "?":
         sendLines(player, [
@@ -422,6 +430,8 @@ export class TestMode {
           "§f/aibot:debug clear§r — empty the log (it survives world reloads)",
           "§f/aibot:debug status§r — mode, counters and loop liveness",
           "§f/aibot:test§r — full check-up: chat, commands, entity, model, movement, mining, persistence",
+          "§f/aibot:acceptance§r — the AC-01..AC-44 gameplay acceptance verdicts, measured in this world",
+          "§f/aibot:acceptance mine move§r — also run the two world-touching probes; §fmanual§r prints the human steps",
           "§f/aibot:test net§r — the same, plus a real request to the AI endpoint",
           "§7On builds with chat events these are also §f!aibot debug …§7 / §f!aibot test§7, and the panel has the same buttons§r"
         ]);
@@ -429,6 +439,31 @@ export class TestMode {
       default:
         sendLines(player, [`§eUnknown test-mode sub-command "§f${action}§e".§r`, ...this.statusLines().slice(1)]);
         return true;
+    }
+  }
+
+  /**
+   * The acceptance runner must never be able to take the pack down either — it
+   * pokes the live bot, and a diagnostic that kills the bot is worse than no
+   * diagnostic at all.
+   */
+  async runAcceptance(player, controller, args = []) {
+    const wanted = (Array.isArray(args) ? args : String(args).split(/\s+/)).map((entry) => String(entry).toLowerCase()).filter(Boolean);
+    try {
+      if (wanted.includes("manual") || wanted.includes("steps")) {
+        printManualSteps(player);
+        return true;
+      }
+      const probes = [];
+      if (wanted.includes("mine")) probes.push("mine");
+      if (wanted.includes("move")) probes.push("move");
+      if (wanted.includes("all")) probes.push("mine", "move");
+      await runAcceptance({ player, controller, testMode: this, probes });
+      return true;
+    } catch (error) {
+      this.error("acceptance", error, { fix: "the acceptance runner crashed — report exactly this error" });
+      sendLines(player, [`§c✖ The acceptance run crashed: §r${describe(error)}`]);
+      return false;
     }
   }
 

@@ -1,4 +1,4 @@
-import { parseBotCommand, parseIntent } from "./core/intent-parser.js";
+import { parseBotCommand, parseIntent, parseOrder } from "./core/intent-parser.js";
 import { showControlPanel, showCreateBot } from "./ui/control-panel.js";
 import { SCRIPT_VERSION } from "./core/version.js";
 import { chatAvailable, commandHint, noBotMessage } from "./core/hints.js";
@@ -106,9 +106,49 @@ export async function handleChat(player, message, controller) {
         if (agent) agent.stop(); else player.sendMessage(noBotMessage(controller));
         return true;
       }
-      case "return": {
-        const agent = controller.forPlayer(player, command.args.join(" "));
-        if (agent) agent.returnHome(); else player.sendMessage(noBotMessage(controller));
+      case "return":
+      case "come": {
+        // AC-36: "come" walks the bot to whoever asked; "return" is the same
+        // trip with the owner as the destination. Both keep the task paused with
+        // a reason instead of dropping it (AC-28).
+        const agent = controller.forPlayer(player, command.command === "come" ? "" : command.args.join(" "));
+        if (!agent) { player.sendMessage(noBotMessage(controller)); return true; }
+        if (command.command === "come") agent.comeTo(player); else agent.returnHome();
+        return true;
+      }
+      case "mine": {
+        // AC-14: /bot mine stone [count] — real blocks, verified, with the tool
+        // check done up front so an impossible request is refused in words.
+        player.sendMessage(controller.mine(player, command.args));
+        return true;
+      }
+      case "collect":
+      case "gather":
+      case "get": {
+        // AC-04/AC-15: the same task the natural-language order creates.
+        player.sendMessage(controller.collect(player, command.args));
+        return true;
+      }
+      case "task":
+      case "tasks":
+      case "objective": {
+        // AC-04: show the objective card (task / target / required / progress).
+        player.sendMessage(controller.task(player, command.args.join(" ")));
+        return true;
+      }
+      case "eat":
+      case "food": {
+        // AC-21: one attempt, one honest answer — no retry loop.
+        const agent = controller.forPlayer(player);
+        if (!agent) { player.sendMessage(noBotMessage(controller)); return true; }
+        agent.eatOnDemand(player);
+        return true;
+      }
+      case "acceptance":
+      case "ac": {
+        // AC-01..AC-44: run the in-world acceptance check-up.
+        const handled = await controller.test.handle(player, "acceptance", command.args, controller);
+        if (!handled) player.sendMessage("§cThe acceptance runner is not loaded on this build.§r");
         return true;
       }
       case "protect": {
@@ -136,11 +176,21 @@ export async function handleChat(player, message, controller) {
       case "command": player.sendMessage(controller.runNamedCommand(player, command.args[0], command.args.slice(1))); return true;
       case "say":
       case "tell":
-      case "chat": {
-        // !aibot say hello  — force a spoken reply from your bot
+      case "chat":
+      case "ask": {
+        // AC-03 on a build with no chat events: this is the supported way to
+        // *talk* to the bot. The words go through the exact same intent parser
+        // as a chat mention, so "/bot:say collect 16 oak logs" creates the task
+        // and "/bot:say hi" gets a spoken answer.
         const agent = controller.forPlayer(player);
         if (!agent) { player.sendMessage(noBotMessage(controller)); return true; }
-        await agent.chatWith(player, command.args.join(" ") || "hi");
+        const words = command.args.join(" ").trim();
+        const intent = parseOrder(words, agent.name);
+        if (words && intent && intent.type !== "chat") {
+          await handleIntent(player, intent, agent, controller);
+          return true;
+        }
+        await agent.chatWith(player, words || "hi");
         return true;
       }
       default:
@@ -158,15 +208,30 @@ export async function handleChat(player, message, controller) {
     return true;
   }
 
+  await handleIntent(player, intent, agent, controller);
+  return true;
+}
+
+/**
+ * Execute one parsed intent. Shared by the chat path and the `/bot:say`
+ * command path so a player gets identical behaviour whichever transport this
+ * build supports (AC-03).
+ */
+async function handleIntent(player, intent, agent, controller) {
   switch (intent.type) {
     case "follow": agent.follow(); break;
     case "stop": agent.stop(); break;
+    case "come": agent.comeTo(player); break;
     case "return": agent.returnHome(); break;
     case "protect": agent.protect(); break;
     case "cancel": agent.cancel(); break;
     case "resume": agent.resume(); break;
     case "inventory": player.sendMessage(agent.inventoryText()); break;
     case "status": player.sendMessage(agent.statusText()); break;
+    case "task": player.sendMessage(agent.taskText()); break;
+    case "mine":
+      agent.mineTask(intent.block, intent.count ?? 8, intent.goal);
+      break;
     case "collect":
       agent.createCollectTask(intent.block, intent.count, intent.goal);
       break;
@@ -186,8 +251,9 @@ export async function handleChat(player, message, controller) {
       break;
     }
     case "eat": {
-      agent.engine.execute({ type: "eat_food" });
-      agent.say("Eating if I have food.", player);
+      // AC-20/AC-21: eat when it makes sense, and say so plainly when there is
+      // nothing to eat instead of promising a meal that cannot happen.
+      agent.eatOnDemand(player);
       break;
     }
     case "use_item": {
@@ -198,12 +264,11 @@ export async function handleChat(player, message, controller) {
       agent.say("Building from chat is not auto-created yet — use a validated build plan.", player);
       break;
     case "chat":
-      await agent.chatWith(player, intent.text || message);
+      await agent.chatWith(player, intent.text || "");
       break;
     default:
-      await agent.chatWith(player, intent.text || message);
+      await agent.chatWith(player, intent.text || "");
   }
-  return true;
 }
 
 export { showCreateBot, reportCreate };

@@ -40,7 +40,13 @@ export class MemoryStore {
 
   observe(observation) {
     if (!observation) return;
-    for (const block of (observation.blocks || []).slice(0, 8)) {
+    // Prefer the curated resource list: the nearest 8 blocks of a raw scan are
+    // almost always the ground the bot is standing on, which is worth nothing
+    // when it later needs to remember where it saw ore or a tree.
+    const resources = Array.isArray(observation.resources) && observation.resources.length
+      ? observation.resources
+      : (observation.blocks || []);
+    for (const block of resources.slice(0, 8)) {
       const value = { id: block.id, position: block.position, dimension: observation.dimension, at: Date.now() };
       const existing = this.data.knownResources.find((entry) => entry.id === value.id && entry.dimension === value.dimension);
       if (existing) Object.assign(existing, value); else this.data.knownResources.push(value);
@@ -54,6 +60,28 @@ export class MemoryStore {
     this.data.knownResources = this.data.knownResources.slice(-24);
     this.data.knownPlayers = this.data.knownPlayers.slice(-12);
     this.data.knownDangerZones = this.data.knownDangerZones.slice(-12);
+  }
+
+  /**
+   * The most recent sighting of a block id, if it is still young enough to
+   * trust. Three minutes is the honest limit: blocks get mined, water flows and
+   * other players build — a stale memory would send the bot to an empty hole.
+   * @param {string} id
+   * @param {number} [maxAgeMs]
+   * @returns {{id:string, position:number[], dimension:string, at:number}|null}
+   */
+  knownResource(id, maxAgeMs = 180000) {
+    const wanted = String(id || "");
+    const now = Date.now();
+    const matches = this.data.knownResources.filter((entry) => entry.id === wanted && Array.isArray(entry.position) && now - Number(entry.at || 0) <= maxAgeMs);
+    if (!matches.length) return null;
+    return matches[matches.length - 1];
+  }
+
+  /** Drop a memory that turned out to be wrong, so the bot stops revisiting it. */
+  forgetResource(id) {
+    const wanted = String(id || "");
+    this.data.knownResources = this.data.knownResources.filter((entry) => entry.id !== wanted);
   }
 
   fact(text) {
