@@ -277,7 +277,16 @@ export async function runSelfTest(options = {}) {
           if (controller?.probe) controller.probe.suppressAutoRegister = true;
           for (let offset = 0; offset <= 2 && !probe; offset += 1) {
             const cell = { x: origin.x + 1.5, y: origin.y + offset, z: origin.z + 0.5 };
-            try { probe = dimension.spawnEntity("aibot:companion", cell); }
+            try {
+              probe = dimension.spawnEntity("aibot:companion", cell);
+              // The entitySpawn event dispatches only after this run returns
+              // (end of tick) — by then the boolean flag above is already
+              // false again, and the probe used to be adopted as a phantom
+              // bot anyway (the "auto-registered …" note logged at the exact
+              // self-test tick). Recording the probe's entity id gives
+              // main.js a guard that does not depend on dispatch timing.
+              if (probe && controller?.probe) controller.probe.probeId = probe.id;
+            }
             catch (error) { spawnError = error; }
           }
         } catch (error) {
@@ -352,9 +361,19 @@ export async function runSelfTest(options = {}) {
       const subject = bot || probe;
       if (!subject) report.skip("movement", "entity APIs", "no bot and no probe entity to measure");
       else {
-        const missing = ["getVelocity", "setVelocity", "setRotation", "teleport"].filter((name) => tryRun(() => typeof subject[name] !== "function", true));
-        if (missing.length) report.fail("movement", "entity APIs", `missing on the entity: ${missing.join(", ")}`, "the bot cannot be steered or moved on this build; scripted movement needs @minecraft/server 2.x");
-        else report.pass("movement", "entity APIs", "getVelocity / setVelocity / setRotation / teleport all callable");
+        // setVelocity was removed in @minecraft/server 2.0.0; the movement loop
+        // steers with applyImpulse (the delta of the wanted and the read
+        // velocity) there. Either writer is enough — requiring setVelocity
+        // made this check fail on the very builds the pack targets.
+        const missing = ["getVelocity", "setRotation", "teleport"].filter((name) => tryRun(() => typeof subject[name] !== "function", true));
+        const writer = tryRun(() => typeof subject.setVelocity === "function" ? "setVelocity" : typeof subject.applyImpulse === "function" ? "applyImpulse" : "", "");
+        if (missing.length || !writer) {
+          report.fail("movement", "entity APIs",
+            `missing on the entity: ${[...missing, ...(writer ? [] : ["setVelocity/applyImpulse"])].join(", ")}`,
+            "the bot cannot be steered on this build: the movement loop needs getVelocity plus setVelocity (API 1.x) or applyImpulse (API 2.x)");
+        } else {
+          report.pass("movement", "entity APIs", `getVelocity / ${writer} / setRotation / teleport all callable`);
+        }
         const ground = tryRun(() => subject.isOnGround, "<<unreadable>>");
         report.add("movement", "ground state", ground === "<<unreadable>>" ? "warn" : "pass", `isOnGround = ${ground}`, "without it the bot cannot decide to jump; stepping is capped and never teleports");
         const standable = tryRun(() => isSafeCell(subject.dimension, subject.location), false);
@@ -431,6 +450,8 @@ export async function runSelfTest(options = {}) {
     // real bot on the next entitySpawn, i.e. the check-up would create the very
     // phantom it is supposed to help diagnose.
     if (probe) tryRun(() => probe.remove());
+    // The adoption guard must not outlive the probe it describes.
+    if (controller?.probe) controller.probe.probeId = null;
     tryRun(() => testMode?.persist?.({ force: true }));
   }
   return report.rows;

@@ -329,6 +329,14 @@ function autoRegisterCompanion(entity) {
     // and see a bot. Adopting it would add a phantom bot to /aibot:list that
     // the player then has to remove, so registration is paused while it lives.
     if (controller.probe?.suppressAutoRegister) return;
+    // That pause flag only covers the synchronous spawnEntity call, but
+    // entitySpawn fires after it returns — by then the flag is already false
+    // again, and the probe used to be adopted anyway (that is the
+    // "auto-registered …" note in the error log at the exact self-test tick,
+    // and briefly a second bot named AIBot in /aibot:list). The probe's entity
+    // id, recorded for exactly as long as the probe lives, is the guard that
+    // does not depend on when the game dispatches the event.
+    if (controller.probe?.probeId != null && String(entity.id) === String(controller.probe.probeId)) return;
     const hasOwner = entity.getDynamicProperty("aibot:owner_id");
     if (!hasOwner) {
       try {

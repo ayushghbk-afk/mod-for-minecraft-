@@ -110,7 +110,17 @@ export class Entity {
   clearVelocity() { this.velocity = { x: 0, y: 0, z: 0 }; }
   /** The test world has no collision simulation; the bot is treated as grounded. */
   get isOnGround() { return this.grounded !== false; }
-  applyImpulse(value) { this.velocity = { ...value }; this.location = { x: this.location.x + value.x, y: this.location.y + value.y, z: this.location.z + value.z }; }
+  /**
+   * Real @minecraft/server semantics: the impulse is ADDED to the current
+   * velocity — it never replaces it. On API 2.x builds setVelocity does not
+   * exist and this delta call is the only way to steer (see navigation.js
+   * writeVelocity), so the stub must model it the same way.
+   */
+  applyImpulse(value) {
+    const vel = this.velocity || { x: 0, y: 0, z: 0 };
+    this.velocity = { x: vel.x + value.x, y: vel.y + value.y, z: vel.z + value.z };
+    this.location = { x: this.location.x + value.x, y: this.location.y + value.y, z: this.location.z + value.z };
+  }
   applyDamage(amount = 1) {
     const health = this.components.get("minecraft:health");
     if (health) {
@@ -200,7 +210,11 @@ class ScriptWorld {
     ]);
     this.afterEvents = {
       chatSend: new Signal(), entityDie: new Signal(), playerSpawn: new Signal(),
-      playerInteractWithEntity: new Signal(), itemUse: new Signal()
+      playerInteractWithEntity: new Signal(), itemUse: new Signal(),
+      // Never fired by the stub itself — tests use them to deliver
+      // entitySpawn/entityLoad at the exact (deferred) moment real Bedrock
+      // would, e.g. for the self-test probe adoption guard in main.js.
+      entitySpawn: new Signal(), entityLoad: new Signal()
     };
     this.beforeEvents = { chatSend: new Signal(), itemUse: new Signal() };
     this.messages = [];
