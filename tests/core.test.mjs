@@ -60,6 +60,10 @@ test("pathfinder exports a bounded A* route helper", async () => {
   assert.equal(typeof nav.findLocalRoute, "function");
   assert.equal(typeof nav.moveEntityTowards, "function");
   assert.equal(typeof nav.setMoveAnim, "function");
+  // Player-like movement plumbing: per-tick velocity steering + smooth stop.
+  assert.equal(typeof nav.applyPlayerStep, "function");
+  assert.equal(typeof nav.stopEntity, "function");
+  assert.deepEqual(nav.MOVEMENT_SPEEDS, { walk: 0.215, sprint: 0.279 });
   // Empty/unsafe dimension still returns an array (never throws).
   const fakeDim = { getBlock() { return { typeId: "minecraft:air" }; } };
   const route = nav.findLocalRoute(fakeDim, { x: 0, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }, { maxNodes: 40 });

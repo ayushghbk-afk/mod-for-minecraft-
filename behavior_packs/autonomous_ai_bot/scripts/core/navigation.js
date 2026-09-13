@@ -13,7 +13,26 @@ const DANGEROUS = new Set([
 const WATER = new Set(["minecraft:water", "minecraft:flowing_water", "minecraft:bubble_column"]);
 
 const routes = new Map();
+/** Per-entity steering state owned by the player-like movement controller. */
 const moveState = new Map();
+/** Last published walk-animation factor, so the synced property is not re-written every tick. */
+const animState = new Map();
+
+// --- Player-like movement tuning (blocks/tick at 20 tps) ---
+// A real player's input is a constant horizontal velocity, so the bot now
+// steers velocity the same way instead of taking raw impulses:
+//   walk ≈ 0.215 (≈4.3 m/s, vanilla player walk),
+//   sprint ≈ 0.279 (≈5.6 m/s, vanilla player sprint),
+//   jump impulse 0.42 (vanilla player jump rise).
+const WALK_SPEED = 0.215;
+const SPRINT_SPEED = 0.279;
+const JUMP_VELOCITY = 0.42;
+/** Horizontal damping per tick while easing to a stop (player braking feel). */
+const STOP_FRICTION = 0.6;
+/** Steering states older than this are treated as "release the keys". */
+const STEERING_TIMEOUT_MS = 1500;
+/** Velocity lerp factor per tick toward the travel direction (turning feel). */
+const TURN_RATE = 0.45;
 
 function key(p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`; }
 export function distance(a, b) {
@@ -133,6 +152,7 @@ export function findLocalRoute(dimension, start, target, options = {}) {
   const costs = new Map([[key(origin), 0]]);
   let best = origin;
   let bestScore = heuristic(origin, goalCell);
+  let reached = false;
 
   for (let visited = 0; open.length && visited < maxNodes; visited += 1) {
     const current = pop();
@@ -140,6 +160,7 @@ export function findLocalRoute(dimension, start, target, options = {}) {
     if (h < bestScore) { best = current; bestScore = h; }
     if (Math.hypot(current.x - goalCell.x, current.z - goalCell.z) <= 1.05 && Math.abs(current.y - goalCell.y) <= 1) {
       best = current;
+      reached = true;
       break;
     }
     for (const next of neighbours(dimension, current)) {
@@ -156,6 +177,19 @@ export function findLocalRoute(dimension, start, target, options = {}) {
   }
 
   if (key(best) === key(origin)) return [];
+  if (!reached) {
+    // Distinguish "the goal is far away" from "the goal is blocked":
+    //  • goal OUTSIDE the search region → a partial route toward the best
+    //    cell is the intended long-range follow behaviour (re-plan as the bot
+    //    closes the distance);
+    //  • goal INSIDE the search region but not reached → no route exists.
+    //    Returning a partial route used to send the bot to the cell in front
+    //    of the wall, where it shoved, "got stuck", and the recovery loop
+    //    teleported it around its own feet.
+    const goalInRegion = Math.hypot(goalCell.x - origin.x, goalCell.z - origin.z) <= maxRadius
+      && Math.abs(goalCell.y - origin.y) <= 12;
+    if (goalInRegion) return [];
+  }
   const path = [];
   for (let cursor = best; key(cursor) !== key(origin) && path.length < 48;) {
     path.unshift({ x: cursor.x + 0.5, y: cursor.y, z: cursor.z + 0.5 });
@@ -168,15 +202,32 @@ export function findLocalRoute(dimension, start, target, options = {}) {
 function routeState(entity, target, options = {}) {
   const targetKey = key(target);
   let state = routes.get(entity.id);
-  const stale = !state || state.targetKey !== targetKey || state.route.length === 0 || Date.now() - state.plannedAt > 2200;
+  // An empty route is NOT automatically stale — it means one of two things:
+  //   • the bot walked through every waypoint (route consumed; the target is
+  //     still far away but reachable) → re-route promptly, or
+  //   • A* found no route at all (target unreachable) → re-check at a calm
+  //     1.5 s cadence, or immediately when the target moved, so the bot
+  //     resumes the moment a path opens without re-running the full search on
+  //     every planning call (that storm was the old bug: a full A* every
+  //     5-tick while following at range, plus a second full search every
+  //     3.5 s from the stuck recovery).
+  const targetMoved = !state?.lastTarget || distance(state.lastTarget, target) > 2;
+  const stale =
+    !state ||
+    state.targetKey !== targetKey ||
+    (!state.noRoute && state.route.length === 0) ||
+    (state.noRoute ? targetMoved || Date.now() - state.plannedAt > 1500 : Date.now() - state.plannedAt > 2200);
   if (stale) {
+    const route = findLocalRoute(entity.dimension, entity.location, target, options);
     state = {
       targetKey,
-      route: findLocalRoute(entity.dimension, entity.location, target, options),
+      route,
+      noRoute: route.length === 0,
+      lastTarget: { x: target.x, y: target.y, z: target.z },
       plannedAt: Date.now(),
       failures: state?.failures || 0,
-      last: { ...entity.location },
-      lastProgressAt: Date.now()
+      last: state?.last || { ...entity.location },
+      lastProgressAt: state?.lastProgressAt || Date.now()
     };
     routes.set(entity.id, state);
   }
@@ -194,8 +245,13 @@ function recover(entity, target, state) {
   state.failures += 1;
   state.route = findLocalRoute(entity.dimension, entity.location, target, { maxNodes: 560, maxRadius: 32 });
   state.plannedAt = Date.now();
-  if (state.route.length || state.failures < 2) return false;
-  // Teleport is recovery-only after repeated failed replans with no movement.
+  state.noRoute = state.route.length === 0;
+  if (state.noRoute || state.failures < 2) return false;
+  // Teleport is recovery-only after repeated failed replans with no movement —
+  // and only when a REAL route exists but the bot is stuck on it. When no
+  // route exists at all the target is unreachable: teleporting the bot between
+  // neighbouring cells cannot change that, it just made it teleport in place
+  // forever (the reported "bot glitches around" bug on an unreachable target).
   const origin = { x: Math.floor(entity.location.x), y: Math.floor(entity.location.y), z: Math.floor(entity.location.z) };
   const candidates = neighbours(entity.dimension, origin);
   // Prefer a cell closer to the target.
@@ -230,39 +286,108 @@ function faceTowards(entity, target) {
 }
 
 /** Publish a client-synced move factor so the resource pack can drive walk legs. */
-export function setMoveAnim(entity, factor) {
+export function setMoveAnim(entity, factor, force = false) {
   const value = Math.max(0, Math.min(1, Number(factor) || 0));
+  const prev = animState.get(entity.id)?.factor;
+  if (!force && prev !== undefined && Math.abs(prev - value) < 0.05) return;
+  animState.set(entity.id, { factor: value, at: Date.now() });
   try {
     if (typeof entity.setProperty === "function") entity.setProperty("aibot:move_speed", value);
   } catch { /* property may be missing on older packs still loaded */ }
   try {
     entity.setDynamicProperty("aibot:move_speed", value);
   } catch { /* entity unloading */ }
-  const prev = moveState.get(entity.id) || { factor: 0 };
-  moveState.set(entity.id, { factor: value, at: Date.now(), last: prev });
 }
 
 export function clearRoute(entityId) {
   routes.delete(entityId);
   moveState.delete(entityId);
+  animState.delete(entityId);
 }
 
 /**
- * Physics movement with local A* waypoints.
- * Teleport is recovery-only. Does NOT clear velocity every tick (that kills walk
- * animation and makes movement stutter). Faces the travel direction.
+ * Ease the bot to a stop (arrival, /aibot:stop, idle, out-of-range combat).
+ * The per-tick step decelerates the horizontal velocity like a player releasing
+ * the movement keys instead of zeroing it instantly.
+ */
+export function stopEntity(entity) {
+  if (!entity?.id) return;
+  moveState.set(entity.id, {
+    dirX: 0, dirZ: 0, speed: 0, needJump: false,
+    stopping: true, updatedAt: Date.now()
+  });
+}
+
+/**
+ * One tick of player-like velocity control (driven every game tick from the
+ * controller, see main.js):
+ *  - horizontal velocity lerps toward the travel direction, so the bot
+ *    accelerates, turns and eases like a player with held keys — never
+ *    teleports its velocity;
+ *  - the vertical velocity is preserved, so gravity, falls and landings are
+ *    natural; there is no artificial hopping;
+ *  - a jump impulse (vanilla player jump speed) is applied only while a
+ *    step-up is pending AND the bot is on the ground;
+ *  - stale steering (the AI stopped issuing movement) decelerates the bot to a
+ *    smooth stop and clears the walk animation.
+ */
+export function applyPlayerStep(entity) {
+  if (!entity?.id) return;
+  const state = moveState.get(entity.id);
+  if (!state) return;
+  if (!state.stopping && Date.now() - state.updatedAt > STEERING_TIMEOUT_MS) state.stopping = true;
+  let vel;
+  try { vel = entity.getVelocity ? entity.getVelocity() : { x: 0, y: 0, z: 0 }; } catch { return; }
+  try {
+    if (state.stopping) {
+      const horizontal = Math.hypot(vel.x, vel.z);
+      if (horizontal < 0.01) {
+        try { entity.setVelocity({ x: 0, y: vel.y, z: 0 }); } catch { /* unloading */ }
+        setMoveAnim(entity, 0, true);
+        routes.delete(entity.id);
+        moveState.delete(entity.id);
+        return;
+      }
+      try {
+        entity.setVelocity({ x: vel.x * STOP_FRICTION, y: vel.y, z: vel.z * STOP_FRICTION });
+      } catch { /* unloading */ }
+      setMoveAnim(entity, Math.min(1, horizontal / 0.24));
+      return;
+    }
+    const onGround = entity.isOnGround !== false;
+    const y = state.needJump && onGround ? JUMP_VELOCITY : vel.y;
+    const x = vel.x + (state.dirX * state.speed - vel.x) * TURN_RATE;
+    const z = vel.z + (state.dirZ * state.speed - vel.z) * TURN_RATE;
+    try {
+      entity.setVelocity({ x, y, z });
+    } catch {
+      setMoveAnim(entity, 0, true);
+      return;
+    }
+    setMoveAnim(entity, Math.min(1, state.speed / 0.24));
+  } catch { /* entity unloading */ }
+}
+
+/**
+ * Refresh the per-entity steering state for the next waypoint and take an
+ * immediate step. The 1-tick `applyPlayerStep` loop keeps the velocity under
+ * control in between calls, so this no longer injects raw impulses (which
+ * made the bot overshoot player speed and hop every half second).
+ *
+ * `options.speed` is the constant horizontal speed in blocks/tick —
+ * WALK_SPEED for normal walking, SPRINT_SPEED to keep up with a player.
+ * Teleport is recovery-only (see recover()).
  */
 export function moveEntityTowards(entity, target, options = {}) {
   if (!target || !entity?.location) {
-    setMoveAnim(entity, 0);
+    stopEntity(entity);
     return { success: false, reason: "No movement target." };
   }
   const stopDistance = options.stopDistance ?? 1.8;
   const totalDistance = distance(entity.location, target);
   if (totalDistance <= stopDistance) {
     routes.delete(entity.id);
-    setMoveAnim(entity, 0);
-    try { entity.clearVelocity(); } catch { /* unloading */ }
+    stopEntity(entity);
     return { success: true, arrived: true, distance: totalDistance };
   }
 
@@ -270,6 +395,23 @@ export function moveEntityTowards(entity, target, options = {}) {
     maxNodes: options.maxNodes ?? 420,
     maxRadius: options.maxRadius ?? 28
   });
+
+  // A* found no walkable path at all. Ease to a stop and report the verdict
+  // instead of shoving into the obstacle: routeState() re-checks as soon as
+  // the target moves and at least every 1.5 s, so the bot resumes the moment
+  // a path opens. (Steering blindly at the wall — plus the old in-place
+  // teleports — is what made an unreachable target look like a broken bot.)
+  if (state.noRoute) {
+    stopEntity(entity);
+    setMoveAnim(entity, 0, true);
+    return {
+      success: false,
+      arrived: false,
+      unreachable: true,
+      distance: totalDistance,
+      reason: "No walkable path to the target."
+    };
+  }
 
   if (genuineStuck(state, entity.location)) {
     const recovered = recover(entity, target, state);
@@ -279,7 +421,11 @@ export function moveEntityTowards(entity, target, options = {}) {
       arrived: false,
       recovering: true,
       distance: totalDistance,
-      reason: recovered ? "Recovered from a genuine navigation stall." : "Replanning after navigation stall."
+      reason: recovered
+        ? "Recovered from a genuine navigation stall."
+        : state.noRoute
+          ? "No walkable path to the target."
+          : "Replanning after navigation stall."
     };
   }
 
@@ -296,37 +442,28 @@ export function moveEntityTowards(entity, target, options = {}) {
   const dz = waypoint.z - entity.location.z;
   const horizontal = Math.hypot(dx, dz) || 1;
 
-  // Player-like walk speed. Cap keeps physics stable on mobile.
-  const base = Number(options.speed ?? 0.22);
-  const speed = Math.min(0.34, Math.max(0.1, base));
-  const needJump = dy > 0.4 || (waypoint.y > entity.location.y + 0.35);
-  // Small upward impulse for step-ups; avoid constant hopping.
-  const jumpY = needJump ? 0.42 : (entity.location.y < waypoint.y - 0.1 ? 0.08 : 0);
+  // Constant player-like speed (blocks/tick), never above sprint.
+  const base = Number(options.speed ?? WALK_SPEED);
+  const speed = Math.min(SPRINT_SPEED, Math.max(0.08, base));
+  // A genuine step-up only; flat walking adds no vertical velocity.
+  const needJump = dy > 0.35;
 
   faceTowards(entity, waypoint);
-  setMoveAnim(entity, Math.min(1, speed / 0.28));
-
-  try {
-    // Dampen existing horizontal velocity instead of zeroing — smoother gait.
-    try {
-      const vel = entity.getVelocity?.();
-      if (vel && typeof entity.applyKnockback !== "function") {
-        // Soft reset: counteract only part of residual velocity.
-        if (Math.hypot(vel.x, vel.z) > speed * 1.6) entity.clearVelocity();
-      }
-    } catch { /* optional */ }
-
-    entity.applyImpulse({
-      x: (dx / horizontal) * speed,
-      y: jumpY,
-      z: (dz / horizontal) * speed
-    });
-    return { success: true, arrived: false, distance: totalDistance, waypoint, moving: true };
-  } catch (error) {
-    setMoveAnim(entity, 0);
-    return { success: false, reason: `Physics movement failed: ${String(error).slice(0, 120)}`, distance: totalDistance };
-  }
+  moveState.set(entity.id, {
+    dirX: dx / horizontal,
+    dirZ: dz / horizontal,
+    speed,
+    needJump,
+    stopping: false,
+    updatedAt: Date.now()
+  });
+  applyPlayerStep(entity);
+  setMoveAnim(entity, Math.min(1, speed / 0.24));
+  return { success: true, arrived: false, distance: totalDistance, waypoint, moving: true };
 }
+
+/** Named speed presets so call sites stay readable. */
+export const MOVEMENT_SPEEDS = Object.freeze({ walk: WALK_SPEED, sprint: SPRINT_SPEED });
 
 export class StuckDetector {
   constructor() {

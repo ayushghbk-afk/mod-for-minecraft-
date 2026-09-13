@@ -4,7 +4,7 @@ import {
   pickupNearbyItems, readInventory, tryEatBestFood, useItem
 } from "./inventory.js";
 import { setBotStatus, BotState } from "./status.js";
-import { moveEntityTowards, setMoveAnim, distance as navDistance } from "./navigation.js";
+import { MOVEMENT_SPEEDS, moveEntityTowards, stopEntity, distance as navDistance } from "./navigation.js";
 
 function blockAt(dimension, position) {
   try {
@@ -124,9 +124,9 @@ export class ActionEngine {
     if (!target) return this.result(action, false, "There is no target to approach.");
     // Vacuum drops while walking so the bot behaves like a player.
     pickupNearbyItems(this.bot, 2.0);
-    const movement = moveEntityTowards(this.bot, target, { speed: 0.26, stopDistance: 2.0, maxRadius: 28 });
+    const movement = moveEntityTowards(this.bot, target, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 2.0, maxRadius: 28 });
     if (movement.success && movement.arrived) {
-      setMoveAnim(this.bot, 0);
+      stopEntity(this.bot);
       setBotStatus(this.bot, BotState.WALKING, { target: target.type || "target", distance: movement.distance });
       return this.result(action, true, "Target reached.", { arrived: true });
     }
@@ -141,7 +141,8 @@ export class ActionEngine {
     const owner = this.agent.owner();
     if (!owner) return this.result(action, false, "Owner is not online.");
     pickupNearbyItems(this.bot, 2.0);
-    const movement = moveEntityTowards(this.bot, owner.location, { speed: 0.28, stopDistance: 2.5, maxRadius: 32 });
+    // Follow at sprint speed so the bot keeps up with a walking/sprinting player.
+    const movement = moveEntityTowards(this.bot, owner.location, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: 2.5, maxRadius: 32 });
     setBotStatus(this.bot, BotState.FOLLOWING, { target: owner.name, distance: movement.distance });
     return movement.success
       ? this.result(action, false, "Following owner.", { pending: true })
@@ -151,7 +152,7 @@ export class ActionEngine {
   stop(action) {
     this.agent.runtime.follow = false;
     this.agent.runtime.plan = null;
-    setMoveAnim(this.bot, 0);
+    stopEntity(this.bot);
     setAttackingFlag(this.bot, false);
     setBotStatus(this.bot, BotState.IDLE);
     return this.result(action, true, "Stopped.");
@@ -226,10 +227,17 @@ export class ActionEngine {
         if (d < nearestDist) { nearest = itemEntity; nearestDist = d; }
       }
       if (nearest && nearestDist > 1.6) {
-        moveEntityTowards(this.bot, nearest.location, { speed: 0.26, stopDistance: 1.2 });
+        const move = moveEntityTowards(this.bot, nearest.location, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 1.2 });
         setBotStatus(this.bot, BotState.COLLECTING, { target: wanted, distance: nearestDist });
+        // No walkable path to the drop: fail the action so the plan can retry
+        // or give up — returning pending here used to hang the task in
+        // COLLECTING forever on an unreachable drop.
+        if (!move.success) return this.result(action, false, move.reason || "Dropped item is out of reach.", { distance: nearestDist });
         return this.result(action, false, "Moving to dropped item.", { pending: true });
       }
+      // Drop is close enough to vacuum — release movement keys (like a player
+      // who stops walking once the item is in reach).
+      stopEntity(this.bot);
     } catch { /* query failed */ }
 
     // Player-like vacuum pickup.
@@ -315,7 +323,7 @@ export class ActionEngine {
       // Close distance with pathfinder — never freeze out of range.
       if (distance > 2.8) {
         setAttackingFlag(this.bot, false);
-        const movement = moveEntityTowards(this.bot, target.location, { speed: 0.3, stopDistance: 2.0, maxRadius: 24 });
+        const movement = moveEntityTowards(this.bot, target.location, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: 2.0, maxRadius: 24 });
         setBotStatus(this.bot, BotState.ATTACKING, { target: target.typeId, distance });
         return this.result(action, false, movement.success ? "Closing on hostile target." : movement.reason, { pending: true });
       }
@@ -327,11 +335,13 @@ export class ActionEngine {
           y: this.bot.location.y,
           z: this.bot.location.z - (target.location.x - this.bot.location.x) * 0.4
         };
-        moveEntityTowards(this.bot, side, { speed: 0.24, stopDistance: 0.5 });
+        moveEntityTowards(this.bot, side, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 0.5 });
         setBotStatus(this.bot, BotState.ATTACKING, { target: target.typeId, distance });
         return this.result(action, false, "Repositioning for a clear swing.", { pending: true });
       }
 
+      // In range: stand still and swing, like a player fighting at arm's length.
+      stopEntity(this.bot);
       const now = Date.now();
       const cooldown = 500;
       if (!this.agent.runtime.lastAttackAt || now - this.agent.runtime.lastAttackAt > cooldown) {
@@ -358,13 +368,15 @@ export class ActionEngine {
         if (hit) {
           this.agent.runtime.lastAttackAt = now;
           setAttackingFlag(this.bot, true);
-          // Brief knockback-feel: face the target.
+          // Face the target with a rotation only. The old "same-location
+          // teleport" re-synced the whole entity every swing, which shows up
+          // as a hitch on mobile.
           try {
-            this.bot.teleport(this.bot.location, {
-              dimension: this.bot.dimension,
-              facingLocation: target.location,
-              keepVelocity: true
-            });
+            const dx = target.location.x - this.bot.location.x;
+            const dz = target.location.z - this.bot.location.z;
+            if (Math.hypot(dx, dz) > 0.01 && typeof this.bot.setRotation === "function") {
+              this.bot.setRotation({ x: 0, y: Math.atan2(-dx, dz) * (180 / Math.PI) });
+            }
           } catch { /* optional */ }
         }
       } else {
@@ -410,7 +422,7 @@ export class ActionEngine {
       const threat = threats[0];
       if (!threat) {
         // Stay near owner while defending with nothing to hit.
-        moveEntityTowards(this.bot, owner.location, { speed: 0.26, stopDistance: 3 });
+        moveEntityTowards(this.bot, owner.location, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 3 });
         setAttackingFlag(this.bot, false);
         return this.result(action, true, "No hostile target is currently near the owner.");
       }
@@ -448,7 +460,7 @@ export class ActionEngine {
     const target = this.agent.runtime.home || owner?.location;
     if (!target) return this.result(action, false, "Home or owner location is unavailable.");
     pickupNearbyItems(this.bot, 2.0);
-    const movement = moveEntityTowards(this.bot, target, { speed: 0.28, stopDistance: 2.5, maxRadius: 32 });
+    const movement = moveEntityTowards(this.bot, target, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: 2.5, maxRadius: 32 });
     setBotStatus(this.bot, BotState.RETURNING, { target: owner?.name || "home", distance: movement.distance });
     return movement.success && movement.arrived
       ? this.result(action, true, "Returned.")
@@ -465,7 +477,7 @@ export class ActionEngine {
       };
     }
     pickupNearbyItems(this.bot, 2.0);
-    const movement = moveEntityTowards(this.bot, this.agent.runtime.exploreTarget, { speed: 0.24, stopDistance: 2, maxRadius: 24 });
+    const movement = moveEntityTowards(this.bot, this.agent.runtime.exploreTarget, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 2, maxRadius: 24 });
     setBotStatus(this.bot, BotState.EXPLORING, { distance: movement.distance });
     if (movement.success && movement.arrived) {
       this.agent.runtime.exploreTarget = null;

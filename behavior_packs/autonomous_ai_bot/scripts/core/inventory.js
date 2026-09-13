@@ -129,8 +129,19 @@ export function equipItem(entity, typeId) {
       const equipment = entity.getComponent("minecraft:equippable");
       if (!equipment) return { success: false, reason: "Equipment component is unavailable." };
       const previous = equipment.getEquipment(EquipmentSlot.Mainhand);
-      if (!equipment.setEquipment(EquipmentSlot.Mainhand, item)) return { success: false, reason: "Item is not accepted by the main hand slot." };
-      container.setItem(slot, previous);
+      // setEquipment returns void on the stable API — checking its return
+      // value treated EVERY equip as rejected (it always "returned"
+      // undefined), reported "Item is not accepted by the main hand slot",
+      // and skipped the container restore below, so whatever was in the main
+      // hand before was silently LOST on every swap. Verify the swap by
+      // reading the slot back instead, and always put the previous item back.
+      equipment.setEquipment(EquipmentSlot.Mainhand, item);
+      const held = equipment.getEquipment(EquipmentSlot.Mainhand);
+      if (!held || held.typeId !== typeId) {
+        equipment.setEquipment(EquipmentSlot.Mainhand, previous ?? undefined);
+        return { success: false, reason: "Item is not accepted by the main hand slot." };
+      }
+      container.setItem(slot, previous ?? undefined);
       return { success: true, item: typeId };
     } catch (error) {
       return { success: false, reason: `Equipment API rejected item: ${String(error)}` };
@@ -157,8 +168,10 @@ export function useItem(entity, typeId, options = {}) {
     try {
       const amplifier = Number(food?.[2] ?? 0);
       const heal = Number(food?.[1] ?? 4);
+      // "saturation" is NOT a Bedrock effect (Java Edition only) — applying it
+      // threw on every meal. Hunger refills on its own when the food is
+      // consumed, so regeneration is the only effect the bot needs.
       entity.addEffect("regeneration", 60 + (amplifier * 40), { amplifier, showParticles: true });
-      entity.addEffect("saturation", 10, { amplifier: 0, showParticles: false });
       return { success: true, used: id, kind: "food", healed: heal };
     } catch { /* effect optional */ }
     return { success: true, used: id, kind: "food", healed: Number(food?.[1] ?? 4) };

@@ -21,7 +21,7 @@
           "variable.prop_move = query.property('aibot:move_speed');",
           "variable.ground = query.modified_move_speed;",
           "variable.speed = query.ground_speed;",
-          "variable.aibot_move = math.clamp(math.max(variable.prop_move, variable.ground * 4.0, variable.speed * 3.5), 0.0, 1.0);"
+          "variable.aibot_move = math.clamp(math.max(math.max(variable.prop_move, variable.ground * 4.0), variable.speed * 3.5), 0.0, 1.0);"
         ],
         "animate": ["controller"]
       },

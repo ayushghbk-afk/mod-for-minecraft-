@@ -436,6 +436,15 @@ controller.diagnostics.tickJob = Boolean(system.runInterval(() => {
   if (controller.tickCount % 60 === 0) { try { sweepDuplicateInstances(); } catch { /* never fatal */ } }
 }, 5));
 
+// Player-like movement: the AI loop above decides WHERE each bot goes (every
+// 5 ticks); this 1-tick job steers the velocity EVERY tick — accelerating,
+// turning, jumping on step-ups and easing to a stop exactly like a player
+// holding the movement keys. This is what makes the bot walk instead of
+// getting shoved by impulses.
+controller.diagnostics.movementJob = Boolean(system.runInterval(() => {
+  try { controller.stepMovement(); } catch (error) { console.error(`[aibot] movement step failed: ${error}`); }
+}, 1));
+
 globalThis.__aibotController = controller;
 
 export function __resetForTests() {

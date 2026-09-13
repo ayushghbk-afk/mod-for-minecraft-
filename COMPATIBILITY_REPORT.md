@@ -57,3 +57,114 @@ Fix:
 - `tests/compatibility.test.mjs` asserts the same bound plus the identifier and `is_summonable`.
 - The spawn-failure message no longer blames an inactive pack when the scripts are demonstrably running.
 - Pack/script version bumped to 2.0.1 so the fixed copy is distinguishable in the join banner.
+
+## v2.2.0 — invisible bot + player-like movement
+
+Two field reports addressed at once: *"bot is invisible / not showing in the
+world"* and *"movement does not feel like a player"*.
+
+### Invisible / not showing in the world
+
+The entity now spawns **visible** and the render chain is audited in CI:
+
+- **Spawn into open space only.** `create()` now filters its spawn candidates
+  with `isSafeCell` (open feet + head, solid floor) and, if the bot still ends
+  up inside solid blocks, `relocateToSafeCell()` teleports it to the nearest
+  standing-open cell (spiral search, radius 4). A bot embedded in terrain is
+  the classic "bot not in the world" report — the entity exists but is
+  swallowed by the blocks.
+- **Geometry hardened.** Every bone in `aibot.player.geo.json` now carries an
+  explicit `pivot` **and** `rotation`. A missing bone rotation is a documented
+  cause of "entity exists but does not render".
+- **Client-entity Molang fixed.** The `pre_animation` script called
+  `math.max(a, b, c)` with three arguments; Molang `math.max` takes exactly
+  two. An invalid expression in the client entity scripts risks Bedrock
+  dropping the whole client entity — the bot then exists but renders nothing.
+  The call is now nested two-argument `math.max`.
+- **Animation controller hardened.** Boolean property transitions now use the
+  classic `query.property('aibot:attacking') == 1.0 / == 0.0` numeric form.
+- **Owners get an answer.** `/aibot:create` now reports the bot's exact
+  coordinates plus an explicit "if you see the name but no body, activate
+  Autonomous AI Bot - Resources" tip; `/aibot:info` lists each bot's position
+  and explains the name-only vs. nothing-at-all distinction.
+- **New CI guard.** `tests/compatibility.test.mjs` audits the full render
+  chain (texture file on disk, geometry identifier + per-bone pivot/rotation,
+  every animation/controller/render-controller reference resolves, controller
+  states only play defined animations, no 3-argument `math.max` anywhere in
+  the resource pack) so an invisible-bot regression fails the build.
+
+### Player-like movement
+
+The old movement applied `applyImpulse` every action tick (5 game ticks):
+velocity accumulated past player speed and the constant upward component made
+the bot hop every half second. Movement is now continuous velocity control,
+like a player holding the movement keys:
+
+- `moveEntityTowards()` only refreshes a per-entity **steering state**
+  (direction, constant speed, step-up flag); it no longer injects impulses.
+- New `applyPlayerStep()` runs **every game tick** (1-tick `stepMovement()`
+  job in `main.js`): horizontal velocity lerps toward the travel direction
+  (natural acceleration/turning), the vertical velocity is preserved (real
+  gravity — no hopping), and a jump impulse of 0.42 blocks/tick (vanilla
+  player jump) is applied only for a genuine step-up while grounded.
+- Speeds match a player: walk 0.215 blocks/tick (≈4.3 m/s), sprint 0.279
+  (≈5.6 m/s, used for follow/return/approach).
+- `stopEntity()` replaces instant `clearVelocity()`: the bot decelerates
+  (0.6× per tick) like a player releasing the keys. Steering states expire
+  after 1.5 s without a refresh, so a bot whose AI stops issuing movement
+  eases to a stop instead of drifting.
+- Pack/script version bumped to 2.2.0 so the fixed build is distinguishable
+  in the join banner.
+
+## v2.2.1 hotfix — unreachable targets, item loss on swap, invalid effect
+
+Five bugs found during a full code audit of the v2.2.0 build:
+
+1. **Items were silently lost on every equipment swap.** `equipItem()`
+   checked the return value of `EquippableComponent.setEquipment()`, but the
+   stable API returns **void** — so every equip "returned" `undefined`, was
+   treated as rejected ("Item is not accepted by the main hand slot"), and
+   skipped the line that puts the previous main-hand item back into the
+   container. The swap itself happened, but the old item (a sword, a food
+   item, a tool) just disappeared. The swap is now verified by reading the
+   slot back, and the previous item is always restored to the container.
+2. **`findLocalRoute()` returned partial "routes" to dead ends.** When A*
+   exhausted its node budget without reaching the goal, it returned a path
+   to the best cell found — for a target inside the search region behind a
+   wall, that is the cell *in front of the wall*. The bot walked there,
+   shoved, got flagged stuck, and entered the recovery loop below. The
+   pathfinder now returns an empty route (the "unreachable" verdict) when
+   the goal is inside the search region but not reached, while a goal outside
+   the region still yields the partial route that powers long-range follow.
+3. **The bot teleported in place on unreachable targets.** With the partial
+   dead-end routes, `recover()` re-planned, found no movement, and — after
+   two failures — teleported the bot to a neighbouring cell… every ~7 s,
+   forever, with no task to fail (a following bot whose owner is in a house
+   or on a ledge). `recover()` now only teleports when a REAL route exists
+   but the bot is stuck on it.
+4. **Unreachable targets caused a full A* replan storm.** `routeState()`
+   treated every empty route as stale, so each 5-tick planning call re-ran
+   the full bounded A* (and `recover()` added a second one every 3.5 s).
+   Empty routes are now tracked as `noRoute`: re-check as soon as the target
+   moves (so recovery is immediate when a path opens) and otherwise at a
+   calm 1.5 s cadence. On a `noRoute` verdict `moveEntityTowards()` eases
+   the bot to a stop and reports `No walkable path to the target.`, so
+   plans fail fast and deterministically (task: "Target unreachable…")
+   instead of churn.
+5. **`useItem()` applied a `"saturation"` effect** — a Java Edition concept
+   that does not exist in Bedrock; the call threw on every meal (swallowed
+   by the "effect optional" catch). Removed; hunger refills itself when the
+   food is consumed.
+
+Related small fixes found in the same audit:
+
+- `collect_item` now fails the action when the dropped item is unreachable
+  instead of returning `pending` forever (the task hung in COLLECTING).
+- `attack_entity` faces the target with `setRotation()` instead of a
+  same-location `teleport()` every swing, which re-synced the whole entity
+  and showed up as a hitch on mobile.
+
+Tests: three new regression tests (unreachable-target behaviour incl. no
+teleport + throttled replans + recovery when a gap opens; collect_item fast
+fail on an unreachable drop; eating only applies valid Bedrock effects and
+restores the previous main-hand item). Pack/script version bumped to 2.2.1.
