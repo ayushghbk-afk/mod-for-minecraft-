@@ -376,6 +376,71 @@ test("a healthy world passes, and the probe entity is never adopted as a bot", a
   assert.match(byId.get("visible model").status ? byId.get("visible model").status : "", /^(skip|pass)$/, "the visual question is auto-skipped when no one can answer");
 });
 
+test("the entity-API check accepts the 2.x velocity API, not just setVelocity", async () => {
+  const player = fresh("TwoX");
+  bedrock.command(player, "!aibot create Walker");
+  const entity = controller().byName("Walker").entity;
+  // Hide setVelocity the way a real @minecraft/server 2.x build does: the
+  // method simply does not exist there, while getVelocity/applyImpulse do.
+  // Requiring setVelocity (the old check) failed on the very builds the pack
+  // declares in its manifest, reporting the pack's own supported API as broken.
+  Object.defineProperty(entity, "setVelocity", { value: undefined, configurable: true });
+  try {
+    const rows = await selftest.runSelfTest({ player, controller: controller(), testMode: harness() });
+    const row = new Map(rows.map((entry) => [entry.id, entry])).get("entity APIs");
+    assert.equal(row.status, "pass");
+    assert.match(row.detail, /applyImpulse/, "the pass line must name the API that is actually used");
+  } finally {
+    delete entity.setVelocity;
+  }
+});
+
+test("the entity-API check still fails when no velocity API exists at all", async () => {
+  const player = fresh("NoVelocity");
+  bedrock.command(player, "!aibot create Stuck");
+  const entity = controller().byName("Stuck").entity;
+  Object.defineProperty(entity, "setVelocity", { value: undefined, configurable: true });
+  Object.defineProperty(entity, "applyImpulse", { value: undefined, configurable: true });
+  try {
+    const rows = await selftest.runSelfTest({ player, controller: controller(), testMode: harness() });
+    const row = new Map(rows.map((entry) => [entry.id, entry])).get("entity APIs");
+    assert.equal(row.status, "fail");
+    assert.match(row.detail, /applyImpulse/, "the failure must name both candidate APIs");
+    assert.match(row.fix, /applyImpulse/);
+  } finally {
+    delete entity.setVelocity;
+    delete entity.applyImpulse;
+  }
+});
+
+test("a late entitySpawn for the self-test's probe is not adopted as a bot", async () => {
+  const player = fresh("ProbeGuard");
+  bedrock.command(player, "!aibot create Guarded");
+  const names = controller().names().slice();
+  // The exact device ordering: the probe is spawned, the narrow suppression
+  // flag is already false again, and ONLY THEN does the deferred entitySpawn
+  // arrive. That used to adopt the probe as a phantom second "AIBot" and log
+  // "auto-registered …" at the very tick /aibot:test ran.
+  const dimension = bedrock.world.getDimension("overworld");
+  const probe = dimension.spawnEntity("aibot:companion", { x: player.location.x + 1.5, y: player.location.y, z: player.location.z + 0.5 });
+  controller().probe.probeId = probe.id;
+  controller().probe.suppressAutoRegister = false;
+  bedrock.world.afterEvents.entitySpawn.fire({ entity: probe });
+  assert.deepEqual(controller().names(), names, "the probe must not become a phantom second bot");
+  assert.equal(probe.getDynamicProperty("aibot:owner_name"), undefined, "the probe must not be assigned an owner");
+  // A genuine companion is still auto-registered when the guard does not match.
+  const real = dimension.spawnEntity("aibot:companion", { x: player.location.x + 3, y: player.location.y, z: player.location.z + 3 });
+  bedrock.world.afterEvents.entitySpawn.fire({ entity: real });
+  assert.ok(controller().all().some((agent) => agent.entity === real), "a real companion is still auto-registered");
+  probe.remove();
+  real.remove();
+  controller().remove(real.id);
+
+  // And the guard never outlives the check-up that recorded it.
+  await selftest.runSelfTest({ player, controller: controller(), testMode: harness() });
+  assert.equal(controller().probe.probeId, null, "the recorded probe id must be cleared when the check-up ends");
+});
+
 test("the network check is opt-in, and reports the endpoint's answer verbatim", async () => {
   const player = fresh("Network");
   bedrock.command(player, "!aibot create AIBot");

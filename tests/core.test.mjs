@@ -69,3 +69,43 @@ test("pathfinder exports a bounded A* route helper", async () => {
   const route = nav.findLocalRoute(fakeDim, { x: 0, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }, { maxNodes: 40 });
   assert.ok(Array.isArray(route));
 });
+
+test("the movement loop steers by delta impulse on @minecraft/server 2.x builds", async () => {
+  const nav = await import("../behavior_packs/autonomous_ai_bot/scripts/core/navigation.js");
+  // A flat stone floor below y=64: every cell at y=64 is standable, so a
+  // walkable route from (0,64,0) to (4,64,0) exists.
+  const dimension = { getBlock({ x, y, z }) { return { typeId: y <= 63 ? "minecraft:stone" : "minecraft:air" }; } };
+  /** A 2.x entity: velocity can be read, and only deltas can be applied. */
+  const entity = {
+    id: "two-x-entity",
+    dimension,
+    location: { x: 0, y: 64, z: 0 },
+    velocity: { x: 0, y: 0, z: 0 },
+    grounded: true,
+    getVelocity() { return { ...this.velocity }; },
+    applyImpulse(value) {
+      this.velocity = { x: this.velocity.x + value.x, y: this.velocity.y + value.y, z: this.velocity.z + value.z };
+    },
+    setRotation(value) { this.rotation = { ...value }; },
+    setDynamicProperty() { /* not under test */ },
+    setProperty() { /* not under test */ }
+  };
+  assert.equal(typeof entity.setVelocity, "undefined", "the fixture must look like a 2.x build, where setVelocity was removed");
+
+  // The whole player-like loop — plan, per-tick steering, smooth stop — has to
+  // work through applyImpulse deltas alone. Before writeVelocity() this steered
+  // every tick, threw "setVelocity is not a function" every tick, and the bot
+  // never moved at all.
+  const outcome = nav.moveEntityTowards(entity, { x: 4, y: 64, z: 0 }, { maxNodes: 200 });
+  assert.equal(outcome.moving, true, "the movement must be accepted");
+  assert.ok(entity.velocity.x > 0, "the first step must already accelerate toward the target");
+  for (let tick = 0; tick < 6; tick += 1) nav.applyPlayerStep(entity);
+  const speed = Math.hypot(entity.velocity.x, entity.velocity.z);
+  assert.ok(Math.abs(speed - nav.MOVEMENT_SPEEDS.walk) < 0.02, `velocity must settle at walking speed (got ${speed.toFixed(3)})`);
+  assert.ok(entity.velocity.x > 0.15, `it must be dominantly toward +x (got ${entity.velocity.x.toFixed(3)})`);
+
+  nav.stopEntity(entity);
+  for (let tick = 0; tick < 10; tick += 1) nav.applyPlayerStep(entity);
+  assert.equal(entity.velocity.x, 0, "the stop must decay the horizontal speed to exactly zero");
+  assert.equal(entity.velocity.z, 0);
+});

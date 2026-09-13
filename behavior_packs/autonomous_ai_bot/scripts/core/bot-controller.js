@@ -684,9 +684,13 @@ export class BotController {
     /**
      * While the self-test's probe entity exists, main.js's auto-registration
      * hook is paused so a throwaway entity is never adopted as a real bot.
-     * @type {{suppressAutoRegister:boolean}}
+     * `probeId` is the stronger guard: the game's entitySpawn event for the
+     * probe arrives only after the spawn call returns, so a boolean set
+     * around that call misses it — the id is recorded for the probe's whole
+     * lifetime instead.
+     * @type {{suppressAutoRegister:boolean, probeId?:string|number|null}}
      */
-    this.probe = { suppressAutoRegister: false };
+    this.probe = { suppressAutoRegister: false, probeId: null };
     /** Filled in by main.js so `!aibot info` can explain a silent failure. */
     this.diagnostics = {
       scriptVersion: "unknown", chatSource: "unbound", itemUseSource: "unbound",

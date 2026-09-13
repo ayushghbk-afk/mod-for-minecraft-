@@ -34,6 +34,36 @@ const STEERING_TIMEOUT_MS = 1500;
 /** Velocity lerp factor per tick toward the travel direction (turning feel). */
 const TURN_RATE = 0.45;
 
+/**
+ * Write an entity's full velocity on any API level.
+ *
+ * `Entity.setVelocity` was removed from the stable Script API in
+ * @minecraft/server 2.0.0 (Bedrock 1.21.20+): velocity can be *read* but only
+ * *deltas* may be applied, through `applyImpulse`. This pack declares 2.9.0,
+ * so on every build it can load on, the old call throws "not a function" —
+ * and because every write below sits in a catch that assumed an unloading
+ * entity, the bot was steered every tick, failed every tick, and simply stood
+ * still forever while the movement job kept "running" (the /aibot:test line
+ * "missing on the entity: setVelocity"). On 2.x we therefore read the current
+ * velocity (getVelocity is still there) and apply the difference as an
+ * impulse; older builds that still expose setVelocity keep using it directly.
+ *
+ * @param {{getVelocity?: () => any, setVelocity?: (v: any) => void, applyImpulse?: (v: any) => void}} entity
+ * @param {{x:number,y:number,z:number}} vel the velocity just read from the entity
+ * @param {{x:number,y:number,z:number}} target the velocity the entity should have
+ */
+function writeVelocity(entity, vel, target) {
+  if (typeof entity.setVelocity === "function") {
+    entity.setVelocity(target);
+    return;
+  }
+  if (typeof entity.applyImpulse === "function") {
+    entity.applyImpulse({ x: target.x - vel.x, y: target.y - vel.y, z: target.z - vel.z });
+    return;
+  }
+  throw new Error("this build exposes neither setVelocity nor applyImpulse");
+}
+
 function key(p) { return `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`; }
 export function distance(a, b) {
   if (!a || !b) return Infinity;
@@ -342,14 +372,14 @@ export function applyPlayerStep(entity) {
     if (state.stopping) {
       const horizontal = Math.hypot(vel.x, vel.z);
       if (horizontal < 0.01) {
-        try { entity.setVelocity({ x: 0, y: vel.y, z: 0 }); } catch { /* unloading */ }
+        try { writeVelocity(entity, vel, { x: 0, y: vel.y, z: 0 }); } catch { /* unloading */ }
         setMoveAnim(entity, 0, true);
         routes.delete(entity.id);
         moveState.delete(entity.id);
         return;
       }
       try {
-        entity.setVelocity({ x: vel.x * STOP_FRICTION, y: vel.y, z: vel.z * STOP_FRICTION });
+        writeVelocity(entity, vel, { x: vel.x * STOP_FRICTION, y: vel.y, z: vel.z * STOP_FRICTION });
       } catch { /* unloading */ }
       setMoveAnim(entity, Math.min(1, horizontal / 0.24));
       return;
@@ -359,7 +389,7 @@ export function applyPlayerStep(entity) {
     const x = vel.x + (state.dirX * state.speed - vel.x) * TURN_RATE;
     const z = vel.z + (state.dirZ * state.speed - vel.z) * TURN_RATE;
     try {
-      entity.setVelocity({ x, y, z });
+      writeVelocity(entity, vel, { x, y, z });
     } catch {
       setMoveAnim(entity, 0, true);
       return;
