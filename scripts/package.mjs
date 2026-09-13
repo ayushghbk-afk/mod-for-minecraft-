@@ -37,6 +37,46 @@ function validatePack(pack) {
   return manifest;
 }
 
+// Bedrock parses entity JSON with a *content* format_version, which is NOT the
+// same numbering as the game/engine version. Anything the parser does not know
+// (for example "1.26.40") makes it drop the whole definition — the scripts still
+// load, but `aibot:companion` never becomes a registered entity type and every
+// spawn fails with "'aibot:companion' is not a valid entity type". These are the
+// highest format versions Mojang actually ships in bedrock-samples.
+const MAX_BEHAVIOR_ENTITY_FORMAT = [1, 21, 50];
+const MAX_CLIENT_ENTITY_FORMAT = [1, 10, 0];
+
+function parseFormatVersion(value, path) {
+  const parts = String(value || "").split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 3 || parts.some((part) => !Number.isInteger(part))) throw new Error(`Invalid format_version "${value}" in ${path}`);
+  return parts;
+}
+
+function assertFormatVersionAtMost(path, key, maximum) {
+  const data = json(path);
+  if (!(key in data)) return;
+  const actual = parseFormatVersion(data.format_version, path);
+  for (let index = 0; index < 3; index += 1) {
+    if (actual[index] < maximum[index]) return;
+    if (actual[index] > maximum[index]) {
+      throw new Error(
+        `${path} declares format_version ${actual.join(".")}, which Bedrock cannot parse ` +
+        `(maximum supported for ${key} is ${maximum.join(".")}). The entity would silently ` +
+        `not be registered and /aibot:create would fail with "not a valid entity type".`
+      );
+    }
+  }
+}
+
+function validateEntityFormats() {
+  for (const path of files(join(root, "behavior_packs")).filter((value) => value.endsWith(".json"))) {
+    assertFormatVersionAtMost(path, "minecraft:entity", MAX_BEHAVIOR_ENTITY_FORMAT);
+  }
+  for (const path of files(join(root, "resource_packs")).filter((value) => value.endsWith(".json"))) {
+    assertFormatVersionAtMost(path, "minecraft:client_entity", MAX_CLIENT_ENTITY_FORMAT);
+  }
+}
+
 function packagePack(pack) {
   const destination = join(output, `${pack.name}.mcpack`);
   // zip is available on the Ubuntu runner and keeps the resulting .mcpack
@@ -54,6 +94,7 @@ function packagePack(pack) {
 rmSync(output, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
 const manifests = packs.map(validatePack);
+validateEntityFormats();
 const allUuids = manifests.flatMap((manifest) => [manifest.header.uuid, ...manifest.modules.map((module) => module.uuid)]);
 if (new Set(allUuids).size !== allUuids.length) throw new Error("Duplicate pack/module UUID detected.");
 const [behaviorManifest, resourceManifest] = manifests;

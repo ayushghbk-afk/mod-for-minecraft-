@@ -167,6 +167,21 @@ The default configuration uses the supplied Cloudflare Worker at `https://groq-p
 
 ## Troubleshooting "the command does nothing / no bot spawns"
 
+> ### Fixed in v2.0.1 — `'aibot:companion' is not a valid entity type`
+>
+> If the script banner loaded but every spawn failed with
+> `Auto-summon failed: Could not spawn aibot:companion … 'aibot:companion' is not a valid entity type`,
+> **even on a world created after installing the pack**, the cause was not the pack being inactive.
+> `entities/companion.json` declared `"format_version": "1.26.40"` and the client entity declared the
+> same. Bedrock's entity **content** format version is a separate numbering from the game version and
+> tops out around `1.21.50` (behaviour entity) / `1.10.0` (client entity). An unknown value makes the
+> game discard the whole definition **silently**: the scripts still run, but the entity type is never
+> registered, so `spawnEntity`, `/summon` and the spawn egg all fail.
+>
+> v2.0.1 sets parseable format versions (`1.21.50` / `1.10.0`), the packager now refuses to build a
+> pack whose entity format version is too high, and a regression test locks it in.
+> **Re-import `AI-Bot-Bedrock-Mobile.mcaddon` (v2.0.1) and leave exactly one copy of the pack active.**
+
 Work through this in order; the first line that is false is your cause.
 
 | Check | Fix |

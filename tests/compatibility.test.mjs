@@ -63,3 +63,24 @@ test("observation is structured and classifies the correctly namespaced creeper"
   assert.ok(Array.isArray(observation.blocks));
   assert.ok(Array.isArray(observation.nearbyItems));
 });
+
+test("entity definitions use format versions Bedrock can actually parse", async () => {
+  // A format_version the parser does not recognise (e.g. the game version
+  // "1.26.40") makes Bedrock drop the definition entirely, so aibot:companion
+  // is never registered and spawning reports "not a valid entity type".
+  const bpEntity = JSON.parse(await readFile("behavior_packs/autonomous_ai_bot/entities/companion.json"));
+  const rpEntity = JSON.parse(await readFile("resource_packs/autonomous_ai_bot/entity/companion.entity.json"));
+  const parse = (value) => value.split(".").map(Number);
+  const atMost = (actual, max) => {
+    for (let i = 0; i < 3; i += 1) {
+      if (actual[i] < max[i]) return true;
+      if (actual[i] > max[i]) return false;
+    }
+    return true;
+  };
+  assert.ok(atMost(parse(bpEntity.format_version), [1, 21, 50]), `behavior entity format_version ${bpEntity.format_version} is not parseable`);
+  assert.ok(atMost(parse(rpEntity.format_version), [1, 10, 0]), `client entity format_version ${rpEntity.format_version} is not parseable`);
+  assert.equal(bpEntity["minecraft:entity"].description.identifier, "aibot:companion");
+  assert.equal(bpEntity["minecraft:entity"].description.is_summonable, true);
+  assert.equal(rpEntity["minecraft:client_entity"].description.identifier, "aibot:companion");
+});

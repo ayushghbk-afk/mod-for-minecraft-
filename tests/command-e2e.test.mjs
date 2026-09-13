@@ -97,7 +97,7 @@ test("a failed spawn reports a real reason instead of staying silent", () => {
     const player = bedrock.addPlayer("Broken");
     const replies = bedrock.command(player, "!aibot create Nobody");
     assert.match(replies[0], /Could not spawn aibot:companion/);
-    assert.match(replies[0], /behavior pack is not active/);
+    assert.match(replies[0], /entity definition itself was rejected/);
     assert.match(replies[1], /!aibot info/);
   } finally {
     bedrock.setEntityRegistered(true);
