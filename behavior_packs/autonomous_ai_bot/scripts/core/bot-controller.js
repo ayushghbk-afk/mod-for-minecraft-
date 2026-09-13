@@ -5,11 +5,11 @@ import { validatePlan } from "./action-validator.js";
 import { makeObservation } from "./observation.js";
 import { MemoryStore } from "./memory.js";
 import { TaskManager, TaskStatus } from "./task-manager.js";
-import { consumeItem, countItem, equipItem, readInventory } from "./inventory.js";
+import { countItem, equipItem, pickupNearbyItems, readInventory, tryEatBestFood, useItem } from "./inventory.js";
 import { BotState, readBotStatus, setBotStatus } from "./status.js";
 import { fallbackPlan, safeFallback } from "./planner.js";
 import { providerFor } from "./ai-provider.js";
-import { StuckDetector } from "./navigation.js";
+import { StuckDetector, setMoveAnim, clearRoute } from "./navigation.js";
 import { validateNamedCommand, canUseBot } from "./permissions.js";
 import { commandHint, talkHint, noBotMessage } from "./hints.js";
 
@@ -28,7 +28,9 @@ const DROP_FOR_BLOCK = Object.freeze({
 
 function positionArray(position) { return [Math.round(position.x), Math.round(position.y), Math.round(position.z)]; }
 function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
-function isHostile(type) { return /zombie|skeleton|creeper|spider|witch|enderman|phantom/.test(String(type)); }
+function isHostile(type) {
+  return /zombie|husk|drowned|skeleton|stray|creeper|spider|cave_spider|witch|enderman|phantom|pillager|vindicator|ravager|slime|magma_cube|blaze|ghast|piglin|hoglin|warden|guardian|shulker|vex|evoker/.test(String(type || ""));
+}
 function isValidEntity(entity) {
   try { return Boolean(entity && entity.isValid === true); } catch (error) { return false; }
 }
@@ -76,6 +78,60 @@ class BotAgent {
   entityInventoryIsFull() { const inventory = readInventory(this.entity); return inventory.size > 0 && inventory.freeSlots === 0; }
   progressText() { const task = this.tasks.current; return task ? `${task.progress}/${task.target}` : ""; }
   notify(message) { this.owner()?.sendMessage(`§b[${this.name}]§r ${message}`); }
+
+  /**
+   * Reply in chat like a teammate. Always goes to the owner (and optionally the
+   * player who just spoke). Used for task acks, free-form chat, and status.
+   */
+  say(message, player = null) {
+    const text = `§b[${this.name}]§r ${message}`;
+    const owner = this.owner();
+    const targets = new Set();
+    if (player) targets.add(player);
+    if (owner) targets.add(owner);
+    if (!targets.size) return;
+    for (const target of targets) {
+      try { target.sendMessage(text); } catch { /* left */ }
+    }
+  }
+
+  /** Handle a free-form chat line directed at this bot (not a structured intent). */
+  async chatWith(player, message) {
+    const text = String(message || "").trim();
+    if (!text) return;
+    this.memory.playerRequest(text);
+    // Lightweight local replies so the bot always "talks back" even without AI.
+    const lower = text.toLowerCase();
+    if (/\b(hi|hello|hey|howdy|yo)\b/.test(lower)) {
+      this.say(`Hey ${player.name}! What do you need?`, player);
+      return;
+    }
+    if (/\b(thank|thanks|thx)\b/.test(lower)) {
+      this.say("Anytime.", player);
+      return;
+    }
+    if (/\b(how are you|you ok|status)\b/.test(lower)) {
+      this.say(this.statusText().replace(/\n/g, " · "), player);
+      return;
+    }
+    if (/\b(help|what can you)\b/.test(lower)) {
+      this.say(`I can follow, mine, collect, protect, pick up drops, use items, and fight. Try "${this.name}, get me 16 oak logs" or "${this.name}, protect me".`, player);
+      return;
+    }
+    // Try the AI provider for a short spoken reply + optional plan when a task is active.
+    if (this.config.provider !== "fallback") {
+      try {
+        const provider = providerFor(this.config);
+        if (provider?.generateChatReply) {
+          const reply = await provider.generateChatReply(text, this.observation, this.memory.promptContext(this.tasks.current));
+          if (reply) { this.say(reply, player); return; }
+        }
+      } catch {
+        // Fall through to the deterministic ack.
+      }
+    }
+    this.say(`Got it. Say a clear order like "follow me", "protect me", "get me 20 iron", or "stop".`, player);
+  }
   persist(force = false) {
     if (!force && this.runtime.tick - this.runtime.lastPersistAt < 100) return;
     try {
@@ -154,25 +210,40 @@ class BotAgent {
     this.runtime.returningAfterTask = false;
     this.runtime.plan = null;
     this.runtime.targetBlock = null;
-    this.notify(`§bTASK CREATED§r ${goal}\nProgress: 0/${target}`);
+    this.runtime.stuck.reset();
+    this.say(`§aOn it.§r ${goal} — I'll path there, mine, and pick up the drops. Progress 0/${target}.`);
     this.requestPlan("new player task");
     this.persist(true);
     return task;
+  }
+
+  /** Use / equip an item from inventory like a player. */
+  useHeldItem(itemId) {
+    const result = useItem(this.entity, itemId);
+    if (result.success) this.say(`Using ${itemId.replace(/^minecraft:/, "").replace(/_/g, " ")}.`);
+    else this.say(`Can't use that: ${result.reason}`);
+    return result;
   }
 
   follow() {
     this.runtime.follow = true;
     this.runtime.plan = null;
     this.runtime.planIndex = 0;
+    this.runtime.stuck.reset();
     setBotStatus(this.entity, BotState.FOLLOWING, { target: this.ownerName || "owner" });
-    this.notify("Following you.");
+    this.say("Following you.");
   }
   stop() {
     this.runtime.follow = false;
     this.runtime.plan = null;
+    this.runtime.combatTarget = null;
+    setMoveAnim(this.entity, 0);
+    try {
+      if (typeof this.entity.setProperty === "function") this.entity.setProperty("aibot:attacking", false);
+    } catch { /* optional */ }
     if (this.tasks.current?.status === TaskStatus.ACTIVE) this.tasks.pause("Stopped by player.");
     setBotStatus(this.entity, BotState.IDLE);
-    this.notify("Stopped. The current task is paused.");
+    this.say("Stopped. Current task is paused.");
     this.persist(true);
   }
   resume() {
@@ -198,21 +269,24 @@ class BotAgent {
     this.runtime.plan = { goal: "Defend owner", thought: "Deterministic threat response.", actions: [{ type: "defend_player" }] };
     this.runtime.planIndex = 0;
     setBotStatus(this.entity, BotState.DEFENDING, { target: this.ownerName || "owner" });
-    this.notify("Defending you.");
+    this.say("Defending you. I'll path to hostiles and fight.");
   }
   returnHome() {
     this.runtime.follow = false;
     this.runtime.plan = { goal: "Return to owner", thought: "Deterministic return.", actions: [{ type: "return_home" }] };
     this.runtime.planIndex = 0;
     this.runtime.returningAfterTask = false;
+    this.say("Coming back to you.");
   }
   cancel() {
     this.tasks.cancel();
     this.runtime.plan = null;
     this.runtime.follow = false;
+    this.runtime.combatTarget = null;
+    setMoveAnim(this.entity, 0);
     setBotStatus(this.entity, BotState.IDLE);
     this.memory.event("Current task cancelled.");
-    this.notify("Task cancelled.");
+    this.say("Task cancelled.");
     this.persist(true);
   }
 
@@ -220,40 +294,68 @@ class BotAgent {
     if (this.config.combatMode === "passive") return null;
     const owner = this.owner();
     try {
-      const origins = this.config.combatMode === "defend_owner" && owner ? [owner.location, this.entity.location] : [this.entity.location];
+      const defendOwner = this.config.combatMode === "defend_owner";
+      const origins = defendOwner && owner ? [owner.location, this.entity.location] : [this.entity.location];
+      const range = defendOwner ? 16 : 10;
       const candidates = new Set();
       for (const origin of origins) {
-        for (const candidate of this.entity.dimension.getEntities({ location: origin, maxDistance: this.config.combatMode === "defend_owner" ? 10 : 7 })) {
+        for (const candidate of this.entity.dimension.getEntities({ location: origin, maxDistance: range })) {
+          if (!isValidEntity(candidate)) continue;
           if (isHostile(candidate.typeId)) candidates.add(candidate);
         }
       }
-      const priority = { "minecraft:creeper": 100, "minecraft:skeleton": 80, "minecraft:witch": 75, "minecraft:zombie": 60, "minecraft:spider": 40 };
-      return [...candidates].sort((a, b) => (priority[b.typeId] || 20) - (priority[a.typeId] || 20) || distance(this.entity.location, a.location) - distance(this.entity.location, b.location))[0] || null;
+      const priority = {
+        "minecraft:creeper": 100, "minecraft:skeleton": 90, "minecraft:stray": 90, "minecraft:witch": 85,
+        "minecraft:pillager": 80, "minecraft:vindicator": 80, "minecraft:zombie": 70, "minecraft:husk": 70,
+        "minecraft:drowned": 65, "minecraft:spider": 50, "minecraft:cave_spider": 55, "minecraft:enderman": 40,
+        "minecraft:phantom": 75, "minecraft:slime": 30, "minecraft:magma_cube": 35
+      };
+      return [...candidates].sort((a, b) =>
+        (priority[b.typeId] || 20) - (priority[a.typeId] || 20)
+        || distance(this.entity.location, a.location) - distance(this.entity.location, b.location)
+      )[0] || null;
     } catch { return null; }
   }
 
   handleCombat() {
+    // Drop a stale combat target that unloaded or died.
+    if (this.runtime.combatTarget && !isValidEntity(this.runtime.combatTarget)) {
+      this.runtime.combatTarget = null;
+      this.runtime.entityTarget = null;
+    }
     const target = isValidEntity(this.runtime.combatTarget) ? this.runtime.combatTarget : this.findThreat();
     let ownHealth;
-    try { ownHealth = this.entity.getComponent("minecraft:health"); } catch (error) { ownHealth = null; }
-    if (target && ownHealth && ownHealth.currentValue <= Math.max(6, ownHealth.effectiveMax * 0.3)) {
-      const foods = [["minecraft:cooked_beef", 8], ["minecraft:bread", 5], ["minecraft:apple", 4]];
-      const food = foods.find(([id]) => countItem(this.entity, id) > 0);
-      if (food && consumeItem(this.entity, food[0], 1).success) {
-        try { this.entity.addEffect("regeneration", 80, { amplifier: 0, showParticles: true }); } catch (error) { /* Food remains consumed; effect failure is logged in memory below. */ }
-        this.memory.event(`Automatically ate ${food[0]} at ${Math.ceil(ownHealth.currentValue)} health.`, "recovery");
-        setBotStatus(this.entity, BotState.EATING, { target: food[0] });
-        return true;
+    try { ownHealth = this.entity.getComponent("minecraft:health"); } catch { ownHealth = null; }
+
+    // Eat when hurt — player-like item use.
+    if (ownHealth && ownHealth.currentValue <= Math.max(8, ownHealth.effectiveMax * 0.45)) {
+      const ate = tryEatBestFood(this.entity);
+      if (ate.success) {
+        this.memory.event(`Ate ${ate.used} at ${Math.ceil(ownHealth.currentValue)} health.`, "recovery");
+        setBotStatus(this.entity, BotState.EATING, { target: ate.used });
+        if (!target) return true;
       }
-      const away = { x: this.entity.location.x + (this.entity.location.x - target.location.x) * 3, y: this.entity.location.y, z: this.entity.location.z + (this.entity.location.z - target.location.z) * 3 };
+    }
+
+    if (target && ownHealth && ownHealth.currentValue <= Math.max(5, ownHealth.effectiveMax * 0.25)) {
+      const away = {
+        x: this.entity.location.x + (this.entity.location.x - target.location.x) * 3,
+        y: this.entity.location.y,
+        z: this.entity.location.z + (this.entity.location.z - target.location.z) * 3
+      };
       this.runtime.targetPosition = away;
       this.engine.execute({ type: "move_to_target" });
       setBotStatus(this.entity, BotState.FLEEING, { target: target.typeId, distance: distance(this.entity.location, target.location) });
       return true;
     }
+
     if (!target) {
       if (this.runtime.combatTarget) {
         this.runtime.combatTarget = null;
+        this.runtime.entityTarget = null;
+        try {
+          if (typeof this.entity.setProperty === "function") this.entity.setProperty("aibot:attacking", false);
+        } catch { /* optional */ }
         if (this.tasks.current?.status === TaskStatus.PAUSED) {
           this.tasks.resume();
           this.memory.event("Threat cleared; task resumed.");
@@ -262,30 +364,38 @@ class BotAgent {
       }
       return false;
     }
+
     if (!this.runtime.combatTarget && this.tasks.current?.status === TaskStatus.ACTIVE) {
       this.tasks.pause(`Hostile entity detected: ${target.typeId}.`);
       this.memory.event(`Task paused for ${target.typeId}.`, "combat");
-      this.notify(`§c⚠ ${target.typeId} detected. Task paused.`);
+      this.notify(`§c⚠ ${target.typeId.replace(/^minecraft:/, "")} detected. Fighting — task paused.`);
     }
     this.runtime.combatTarget = target;
+    this.runtime.entityTarget = target;
+
     const inventory = readInventory(this.entity);
-    if (!String(inventory.selectedItem?.id || "").includes("sword")) {
-      const weapon = ["minecraft:netherite_sword", "minecraft:diamond_sword", "minecraft:iron_sword", "minecraft:stone_sword", "minecraft:wooden_sword"].find((id) => countItem(this.entity, id) > 0);
+    if (!/sword|axe/.test(String(inventory.selectedItem?.id || ""))) {
+      const weapon = [
+        "minecraft:netherite_sword", "minecraft:diamond_sword", "minecraft:iron_sword",
+        "minecraft:stone_sword", "minecraft:golden_sword", "minecraft:wooden_sword",
+        "minecraft:netherite_axe", "minecraft:diamond_axe", "minecraft:iron_axe"
+      ].find((id) => countItem(this.entity, id) > 0);
       if (weapon) equipItem(this.entity, weapon);
     }
-    this.engine.execute({ type: "attack_entity" });
-    try {
-      const health = target.getComponent("minecraft:health");
-      if (health && health.currentValue <= 0) {
-        this.runtime.combatTarget = null;
-        this.runtime.entityTarget = null;
-        if (this.tasks.current?.status === TaskStatus.PAUSED) {
-          this.tasks.resume();
-          this.memory.event("Combat completed; task resumed.", "combat");
-          this.notify(`§a✓ Threat defeated.§r Resuming task. Progress: ${this.progressText()}`);
-        }
+
+    const result = this.engine.execute({ type: "attack_entity" });
+    if (result?.success) {
+      this.runtime.combatTarget = null;
+      this.runtime.entityTarget = null;
+      pickupNearbyItems(this.entity, 4.5);
+      if (this.tasks.current?.status === TaskStatus.PAUSED) {
+        this.tasks.resume();
+        this.memory.event("Combat completed; task resumed.", "combat");
+        this.notify(`§a✓ Threat defeated.§r Resuming task. Progress: ${this.progressText()}`);
+      } else {
+        this.notify("§a✓ Threat defeated.");
       }
-    } catch { /* next observation will clear a removed entity */ }
+    }
     return true;
   }
 
@@ -350,8 +460,17 @@ class BotAgent {
   }
 
   tick(tick) {
-    if (!isValidEntity(this.entity)) return false;
+    if (!isValidEntity(this.entity)) {
+      clearRoute(this.entity?.id);
+      return false;
+    }
     this.runtime.tick = tick;
+
+    // Player-like passive pickup every few ticks while moving or idle near drops.
+    if (tick % 4 === 0) {
+      try { pickupNearbyItems(this.entity, 1.8); } catch { /* ignore */ }
+    }
+
     if (tick % Math.max(10, this.config.observationIntervalTicks) === 0 || !this.observation) {
       this.observation = makeObservation(this.entity, this.tasks.current, this.memory, this.config);
       this.memory.observe(this.observation);
@@ -367,17 +486,32 @@ class BotAgent {
         }
       }
     }
+
+    // Auto-eat outside combat when damaged.
+    if (tick % 40 === 0) {
+      try {
+        const health = this.entity.getComponent("minecraft:health");
+        if (health && health.currentValue < health.effectiveMax * 0.7) tryEatBestFood(this.entity);
+      } catch { /* optional */ }
+    }
+
     if (this.handleCombat()) { this.persist(); return true; }
+
     if (this.runtime.follow && (!this.tasks.current || this.tasks.current.status !== TaskStatus.ACTIVE)) {
       this.engine.execute({ type: "follow_player" });
+    } else if (!this.runtime.plan && !this.runtime.follow) {
+      // Idle — clear walk anim so legs stop.
+      if (tick % 10 === 0) setMoveAnim(this.entity, 0);
     }
+
     if (this.runtime.returningAfterTask && !this.runtime.plan) {
       this.runtime.plan = { goal: "Return to player", thought: "Returning after verified task.", actions: [{ type: "return_home" }] };
       this.runtime.planIndex = 0;
     }
-    if (this.tasks.current?.status === TaskStatus.ACTIVE && !this.runtime.plan && !this.runtime.planning) this.requestPlan("task needs an action");
+    if (this.tasks.current?.status === TaskStatus.ACTIVE && !this.runtime.plan && !this.runtime.planning) {
+      this.requestPlan("task needs an action");
+    }
     if (this.runtime.plan) {
-      const before = this.entity.location;
       this.executePlan();
       const target = this.runtime.targetBlock || this.runtime.targetPosition;
       const stuck = this.runtime.stuck.update(this.entity.location, target);
@@ -389,7 +523,6 @@ class BotAgent {
         this.notify("§cTarget unreachable.§r Task failed after safe recovery attempts.");
         setBotStatus(this.entity, BotState.ERROR, { target: "unreachable" });
       }
-      void before;
     }
     if (this.config.debug && tick % 100 === 0) this.notify(`\n${this.debugText()}`);
     this.persist();

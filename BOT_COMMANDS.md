@@ -70,18 +70,22 @@ its panel, which matters on touch screens where chat is awkward.
 
 ## Natural language
 
-The bot name must be mentioned:
+The bot name must be mentioned. The bot **takes the task and chats back** (owner always gets a reply):
 
 - `Steve, follow me` → follow owner.
 - `Steve, stop` → pause movement/task.
-- `Steve, get me 32 oak logs` → persistent verified collection task.
+- `Steve, get me 32 oak logs` → persistent verified collection task (pathfind → mine → pick up drops).
 - `Steve, mine 20 iron` → bounded iron-ore collection task (progress is raw-iron inventory).
-- `Steve, protect me` → owner-defense mode.
+- `Steve, protect me` → owner-defense mode with real pathfinding combat.
 - `Steve, come back` → return home/owner.
+- `Steve, pick up items` / `Steve, loot` → vacuum nearby dropped items into inventory.
+- `Steve, eat` → use the best food in inventory like a player.
+- `Steve, use iron sword` → equip / use an inventory item.
 - `Steve, show inventory` → actual inventory report.
 - `Steve, what are you doing?` → actual status/task report.
+- `Steve, hi` / any free-form line → the bot replies in chat (local greetings, or AI reply when a provider is configured).
 
-Unknown or unsupported requests are not silently turned into actions.
+Unknown orders still get a spoken hint instead of silence.
 
 ## Status tag
 

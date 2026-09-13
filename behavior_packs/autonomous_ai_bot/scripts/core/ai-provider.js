@@ -37,12 +37,52 @@ export class AIProvider {
       model: this.config.model,
       temperature: 0.1,
       messages: [
-        { role: "system", content: "You are a Minecraft autonomous agent. Return JSON only with thought, goal, and an actions array. Never return commands or arbitrary code. The deterministic game engine validates every action." },
+        { role: "system", content: "You are a Minecraft autonomous agent. Return JSON only with thought, goal, and an actions array. Never return commands or arbitrary code. The deterministic game engine validates every action. Supported actions include find_block, move_to_target, mine_block, collect_item, pickup_item, attack_entity, defend_player, equip_item, use_item, eat_food, follow_player, return_home, explore, drop_item." },
         { role: "user", content: JSON.stringify({ observation, memory, task }) }
       ],
       response_format: { type: "json_object" }
     };
   }
+
+  /**
+   * Short spoken reply for free-form chat directed at the bot. Returns plain
+   * text (no JSON). Failures throw so the caller can fall back locally.
+   */
+  async generateChatReply(playerMessage, observation, memory) {
+    if (!this.transport) throw new AIProviderError("No HTTP transport.", "NO_TRANSPORT");
+    if (!this.config.endpoint || !this.config.model) throw new AIProviderError("Not configured.", "NOT_CONFIGURED");
+    const body = {
+      model: this.config.model,
+      temperature: 0.4,
+      max_tokens: 80,
+      messages: [
+        {
+          role: "system",
+          content: "You are a friendly Minecraft companion bot. Reply in one short plain sentence (max 20 words). No JSON, no markdown, no commands. Stay in character as a helpful teammate."
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            player_said: playerMessage,
+            status: observation?.task || null,
+            inventory_summary: observation?.inventory?.summary?.slice?.(0, 6) || [],
+            memory_facts: memory?.importantFacts?.slice?.(0, 3) || []
+          })
+        }
+      ]
+    };
+    const response = await this.transport({
+      endpoint: this.config.endpoint,
+      headers: { "Content-Type": "application/json" },
+      body,
+      timeoutMs: 12000
+    });
+    const content = contentFromResponse(response);
+    const text = String(content || "").replace(/```[\s\S]*?```/g, "").replace(/\s+/g, " ").trim();
+    if (!text) throw new AIProviderError("Empty chat reply.", "EMPTY_REPLY");
+    return text.slice(0, 180);
+  }
+
   async generatePlan(observation, memory, task) {
     if (!this.transport) throw new AIProviderError("No HTTP transport is available in the Bedrock Script API. Use the documented secure proxy or a host bridge.", "NO_TRANSPORT");
     if (!this.config.endpoint || !this.config.model) throw new AIProviderError("Provider endpoint and model are not configured.", "NOT_CONFIGURED");

@@ -1,7 +1,7 @@
 export const ACTION_TYPES = Object.freeze([
   "find_block", "find_entity", "move_to_target", "follow_player", "stop",
   "mine_block", "collect_item", "pickup_item", "drop_item", "attack_entity", "defend_player",
-  "eat_food", "equip_item", "craft_item", "smelt_item", "open_chest",
+  "eat_food", "use_item", "equip_item", "craft_item", "smelt_item", "open_chest",
   "store_item", "withdraw_item", "sleep", "build", "explore", "return_home", "interact"
 ]);
 
@@ -55,8 +55,13 @@ export function validateAction(action, context = {}) {
     }
     result.position = [x, y, z];
   }
-  if (["equip_item", "drop_item", "store_item", "withdraw_item"].includes(type) && !ID_PATTERN.test(String(action.item || ""))) {
-    return { ok: false, reason: "Item id is invalid." };
+  if (["equip_item", "use_item", "eat_food", "drop_item", "store_item", "withdraw_item"].includes(type)) {
+    const item = action.item || action.food;
+    // eat_food may omit item (engine picks best food); use_item/equip require one.
+    if (type !== "eat_food" && !ID_PATTERN.test(String(item || ""))) {
+      return { ok: false, reason: "Item id is invalid." };
+    }
+    if (item) result.item = String(item).toLowerCase().includes(":") ? String(item).toLowerCase() : `minecraft:${String(item).toLowerCase()}`;
   }
   return { ok: true, action: result };
 }
