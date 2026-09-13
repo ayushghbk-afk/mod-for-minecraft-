@@ -154,19 +154,36 @@ const SLASH_COMMANDS = Object.freeze({
   help: { description: "Show AI Bot commands" },
   panel: { description: "Open the AI Bot control panel" },
   status: { description: "Show what your AI bot is doing", arg: "bot name" },
+  task: { description: "Show the bot's objective card (task, target, required, progress)", arg: "bot name" },
   inventory: { description: "Show what your AI bot is carrying", arg: "bot name" },
   list: { description: "List AI bots in this world" },
   info: { description: "AI Bot diagnostics" },
   follow: { description: "Make your AI bot follow you", arg: "bot name" },
+  come: { description: "Make your AI bot walk to you" },
   stop: { description: "Stop your AI bot", arg: "bot name" },
   return: { description: "Call your AI bot back to you", arg: "bot name" },
+  collect: { description: "Give a collect task, e.g. /aibot:collect 16 oak logs", arg: "count and item" },
+  mine: { description: "Give a mining task, e.g. /aibot:mine stone 16", arg: "block and count" },
   protect: { description: "Make your AI bot defend you", arg: "bot name" },
   cancel: { description: "Cancel the AI bot's current task", arg: "bot name" },
   resume: { description: "Resume a paused AI bot task", arg: "bot name" },
+  eat: { description: "Make your AI bot eat if it is carrying food" },
+  say: { description: "Talk to your bot: /aibot:say collect 8 oak logs", arg: "message" },
   remove: { description: "Despawn your AI bot", arg: "bot name" },
   debug: { description: "Test mode: on | off | log | clear | watch | status", arg: "sub-command" },
-  test: { description: "Run the full self-test; add 'net' to also ping the AI endpoint", arg: "net" }
+  test: { description: "Run the full self-test; add 'net' to also ping the AI endpoint", arg: "net" },
+  acceptance: { description: "Run the AC-01..AC-44 gameplay acceptance check-up in this world" }
 });
+
+/**
+ * The acceptance criteria (and most players) write `/bot stop`, not
+ * `/aibot:stop`. Bedrock custom commands must be namespaced, so the short
+ * namespace is registered as a second, identical surface: same handler, same
+ * permission level, no cheats. If a host refuses the `bot:` namespace (another
+ * pack already owns it) the `aibot:` commands are unaffected — each
+ * registration is guarded on its own.
+ */
+const ALIAS_NAMESPACE = "bot";
 
 let slashCommandsReady = false;
 
@@ -183,9 +200,26 @@ try {
         return;
       }
       let registered = 0;
+      let aliased = 0;
       /** @type {string[]} */
       const refused = [];
+      /** @type {string[]} */
+      const aliasRefused = [];
       for (const [action, spec] of Object.entries(SLASH_COMMANDS)) {
+        const run = (player, argText) => {
+          system.run(() => {
+            handleChat(player, `!aibot ${action}${argText ? ` ${argText}` : ""}`, controller)
+              .catch((error) => reportFailure(player, "Slash command", error));
+          });
+        };
+        const callback = (origin, name) => {
+          const player = origin?.sourceEntity;
+          if (!player || player.typeId !== "minecraft:player") {
+            return { status: CustomCommandStatus.Failure, message: "Only players can use AI Bot commands." };
+          }
+          run(player, String(name ?? "").trim());
+          return { status: CustomCommandStatus.Success };
+        };
         const command = {
           name: `aibot:${action}`,
           description: spec.description,
@@ -194,30 +228,35 @@ try {
         };
         if ("arg" in spec && spec.arg) command.optionalParameters = [{ name: "name", type: CustomCommandParamType.String }];
         const outcome = testMode.guard(`register /aibot:${action}`, () => {
-          registry.registerCommand(command, (origin, name) => {
-            const player = origin?.sourceEntity;
-            if (!player || player.typeId !== "minecraft:player") {
-              return { status: CustomCommandStatus.Failure, message: "Only players can use AI Bot commands." };
-            }
-            const argText = String(name ?? "").trim();
-            system.run(() => {
-              handleChat(player, `!aibot ${action}${argText ? ` ${argText}` : ""}`, controller)
-                .catch((error) => reportFailure(player, "Slash command", error));
-            });
-            return { status: CustomCommandStatus.Success };
-          });
+          registry.registerCommand(command, callback);
           return true;
         }, false, { level: "error", always: true, fix: `the game rejected this command's schema — /aibot:${action} will not exist` });
         if (outcome) registered += 1;
         else refused.push(`aibot:${action}`);
+
+        // Short alias: /bot:stop, /bot:mine stone, /bot:say "follow me" …
+        // A refusal here is a warning, never an error: the pack stays fully
+        // usable through /aibot:*, and another add-on owning "bot:" is not a
+        // fault of this one.
+        const alias = { ...command, name: `${ALIAS_NAMESPACE}:${action}` };
+        const aliasOutcome = testMode.guard(`register /${ALIAS_NAMESPACE}:${action}`, () => {
+          registry.registerCommand(alias, callback);
+          return true;
+        }, false, { level: "warn", fix: `another pack may already own the "${ALIAS_NAMESPACE}:" namespace — /aibot:${action} still works` });
+        if (aliasOutcome) aliased += 1;
+        else aliasRefused.push(`${ALIAS_NAMESPACE}:${action}`);
       }
       slashCommandsReady = registered > 0;
       const total = Object.keys(SLASH_COMMANDS).length;
       controller.diagnostics.slashCommands = registered > 0
-        ? `${registered}/${total} registered (/aibot:create, /aibot:help, /aibot:test, ...)`
+        ? `${registered}/${total} registered (/aibot:create, /aibot:help, /aibot:test, ...) + ${aliased}/${total} short aliases (/bot:stop, /bot:mine ...)`
         : "NOT registered";
+      controller.diagnostics.aliasCommands = aliased > 0
+        ? `${aliased}/${total} registered as /${ALIAS_NAMESPACE}:*`
+        : `unavailable (${aliasRefused.length} refused — another pack may own the namespace)`;
       if (refused.length) testMode.error("slash commands", `${refused.length}/${total} refused by the game: ${refused.join(", ")}`, LOUD);
       else if (!registered) testMode.error("slash commands", "the game accepted none of the /aibot:* commands", LOUD);
+      if (aliasRefused.length) testMode.warn("slash commands", `${aliasRefused.length}/${total} short /${ALIAS_NAMESPACE}:* aliases were refused — use /aibot:* instead`, { fix: "not fatal: the long namespace is the primary surface" });
       console.warn(`[aibot] custom slash commands: ${controller.diagnostics.slashCommands}`);
     });
   } else {

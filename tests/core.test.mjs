@@ -5,6 +5,7 @@ import { MemoryStore } from "../behavior_packs/autonomous_ai_bot/scripts/core/me
 import { TaskManager, TaskStatus } from "../behavior_packs/autonomous_ai_bot/scripts/core/task-manager.js";
 import { parseBotCommand, parseIntent } from "../behavior_packs/autonomous_ai_bot/scripts/core/intent-parser.js";
 import { sanitiseConfig } from "../behavior_packs/autonomous_ai_bot/scripts/core/config.js";
+import { canUseBot } from "../behavior_packs/autonomous_ai_bot/scripts/core/permissions.js";
 
 const position = [0, 64, 0];
 
@@ -24,11 +25,48 @@ test("task manager persists progress, pause, resume and completion", () => {
   const tasks = new TaskManager();
   const task = tasks.create({ goal: "Collect 3 oak logs", kind: "collect", block: "minecraft:oak_log", target: 3, startingCount: 2 });
   assert.equal(task.status, TaskStatus.ACTIVE);
-  tasks.syncCount(3); assert.equal(tasks.current.progress, 1);
-  tasks.pause("zombie"); assert.equal(tasks.current.status, TaskStatus.PAUSED);
-  tasks.resume(); tasks.syncCount(5);
-  assert.equal(tasks.current.status, TaskStatus.COMPLETED);
-  assert.equal(tasks.current.remaining, 0);
+  // AC-19: progress is ABSOLUTE. Holding 2 of a required 3 starts at 2/3, so the
+  // bot goes out for ONE more log instead of three.
+  assert.equal(task.progress, 2);
+  assert.equal(task.remaining, 1);
+  tasks.syncCount(3); assert.equal(tasks.current.progress, 3);
+  assert.equal(tasks.current.status, TaskStatus.COMPLETED, "reaching the required count completes the task");
+  // AC-17: a count that did not change never moves progress backwards or forwards.
+  const second = new TaskManager();
+  second.create({ goal: "Collect 16 oak logs", kind: "collect", block: "minecraft:oak_log", target: 16, startingCount: 5 });
+  assert.equal(second.current.progress, 5);
+  second.syncCount(5);
+  assert.equal(second.current.progress, 5, "a failed mine must not increment progress");
+  second.pause("zombie"); assert.equal(second.current.status, TaskStatus.PAUSED);
+  second.resume(); second.syncCount(20);
+  assert.equal(second.current.status, TaskStatus.COMPLETED);
+  assert.equal(second.current.progress, 16, "progress is capped at the requirement");
+  assert.equal(second.current.remaining, 0);
+});
+
+test("a task already satisfied by the inventory completes instead of collecting more", () => {
+  const tasks = new TaskManager();
+  const task = tasks.create({ goal: "Collect 16 oak logs", kind: "collect", block: "minecraft:oak_log", target: 16, startingCount: 16 });
+  assert.equal(task.status, TaskStatus.COMPLETED);
+  assert.equal(task.alreadySatisfied, true);
+  assert.equal(tasks.stillNeeded(), 0);
+  // AC-27: the completed objective is remembered, so re-asking does not silently
+  // recreate the same finished task.
+  assert.equal(tasks.hasCompleted(task.key), true);
+  assert.equal(tasks.isRepeatOfCompleted({ kind: "collect", block: "minecraft:oak_log", target: 16 }), true);
+});
+
+test("the task card is the AC-04 objective format", () => {
+  const tasks = new TaskManager();
+  tasks.create({ goal: "Collect Oak Logs", kind: "collect", block: "minecraft:oak_log", target: 16 });
+  assert.equal(tasks.describe(), [
+    "Task: Collect Oak Logs",
+    "Target: minecraft:oak_log",
+    "Required: 16",
+    "Progress: 0/16",
+    "Status: ACTIVE",
+    "Still needed: 16"
+  ].join("\n"));
 });
 
 test("memory is bounded and emits relevant prompt context", () => {
@@ -47,6 +85,16 @@ test("player intent parser understands the MVP instruction", () => {
   assert.equal(parseIntent("Steve, pick up items", ["Steve"]).type, "pickup");
   assert.equal(parseIntent("Steve, hi there", ["Steve"]).type, "chat");
   assert.equal(parseIntent("Steve, use iron sword", ["Steve"]).type, "use_item");
+});
+
+test("an ownerless bot is nobody's to command, and a returning owner is recognised by name", () => {
+  const owner = { id: "runtime-1", name: "Ayush" };
+  const stranger = { id: "runtime-2", name: "Someone" };
+  assert.equal(canUseBot(stranger, { ownerId: "", ownerName: "" }, {}), false, "no owner recorded → no stranger commands it");
+  assert.equal(canUseBot(owner, { ownerId: "", ownerName: "" }, {}), false, "…and not the owner either: it must be re-created or re-bound");
+  assert.equal(canUseBot(owner, { ownerId: "stale-from-last-session", ownerName: "Ayush" }, {}), true, "a returning owner matches on the stable name after a reload");
+  assert.equal(canUseBot(stranger, { ownerId: "stale-from-last-session", ownerName: "Ayush" }, {}), false, "a stranger does not");
+  assert.equal(canUseBot(stranger, { ownerId: "", ownerName: "" }, { ownerOnly: false }), true, "owner-gating switched off is shared by design");
 });
 
 test("config sanitisation never persists an API key", () => {

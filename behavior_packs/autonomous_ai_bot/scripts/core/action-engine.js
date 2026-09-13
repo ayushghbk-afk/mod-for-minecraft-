@@ -4,7 +4,10 @@ import {
   pickupNearbyItems, readInventory, tryEatBestFood, useItem
 } from "./inventory.js";
 import { setBotStatus, BotState } from "./status.js";
-import { MOVEMENT_SPEEDS, moveEntityTowards, stopEntity, distance as navDistance } from "./navigation.js";
+import { MOVEMENT_SPEEDS, findReachCell, moveEntityTowards, stopEntity, withinSwingReach, distance as navDistance } from "./navigation.js";
+import { isCreeperType, isHostileType } from "./observation.js";
+import { CREEPER_SAFE_DISTANCE } from "./priority.js";
+import { chooseTool, chooseWeapon, isAppropriate, toolGapMessage, weaponDamage } from "./tools.js";
 
 function blockAt(dimension, position) {
   try {
@@ -13,8 +16,24 @@ function blockAt(dimension, position) {
   } catch { return null; }
 }
 function targetPosition(agent) { return agent.runtime.targetBlock || agent.runtime.targetPosition || null; }
-function hostile(typeId) {
-  return /zombie|husk|drowned|skeleton|stray|creeper|spider|cave_spider|witch|enderman|phantom|pillager|vindicator|ravager|slime|magma_cube|blaze|ghast|piglin|hoglin|warden|guardian|shulker|vex|evoker/.test(String(typeId || ""));
+/**
+ * Creeper numbers, in one place: it ignites inside ~3 blocks and detonates
+ * about 1.5 s later, so the bot strikes from just outside that and stays out
+ * for longer than the fuse (AC-24).
+ */
+const CREEPER_STANDOFF = 3.0;
+const CREEPER_STRIKE_RANGE = 3.2;
+const CREEPER_FUSE_MS = 2600;
+
+/** One classifier for the whole pack — see observation.isHostileType. */
+const hostile = isHostileType;
+
+/** A point `range` blocks directly away from `threat`, for backing off. */
+function awayFrom(origin, threat, range) {
+  const dx = origin.x - threat.x;
+  const dz = origin.z - threat.z;
+  const length = Math.hypot(dx, dz) || 1;
+  return { x: origin.x + (dx / length) * range, y: origin.y, z: origin.z + (dz / length) * range };
 }
 function hasLineOfSight(dimension, from, to) {
   const steps = Math.max(2, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z) * 2));
@@ -36,21 +55,6 @@ function setAttackingFlag(entity, on) {
   try {
     if (typeof entity.setProperty === "function") entity.setProperty("aibot:attacking", Boolean(on));
   } catch { /* property optional */ }
-}
-
-/** Weapon damage by tier — closer to vanilla player swings. */
-function weaponDamage(itemId) {
-  const id = String(itemId || "");
-  if (id.includes("netherite_sword")) return 8;
-  if (id.includes("diamond_sword")) return 7;
-  if (id.includes("iron_sword")) return 6;
-  if (id.includes("stone_sword")) return 5;
-  if (id.includes("golden_sword") || id.includes("wooden_sword")) return 4;
-  if (id.includes("netherite_axe")) return 7;
-  if (id.includes("diamond_axe")) return 6;
-  if (id.includes("iron_axe")) return 5;
-  if (id.includes("axe")) return 4;
-  return 3;
 }
 
 export class ActionEngine {
@@ -95,16 +99,32 @@ export class ActionEngine {
     }
   }
 
+  /**
+   * Pick the target block — and prove it is still there.
+   *
+   * The observation is a snapshot up to a second old, so a log the bot broke one
+   * tick ago is still listed in it. Acting on that snapshot produced the worst
+   * failure this pack ever had: the bot "mined" air, the verification branch saw
+   * the cell it had already broken and reported "Block change verified" a second
+   * time, and the task claimed progress for a block that never changed (AC-13,
+   * AC-17). Every candidate is therefore re-read from the dimension here.
+   */
   findBlock(action) {
-    const match = this.agent.observation?.nearbyBlocks?.find((block) => block.type === action.block);
-    if (!match) {
-      setBotStatus(this.bot, BotState.SEARCHING, { target: action.block });
-      return this.result(action, false, `No ${action.block} was found within the observation radius.`);
+    const matches = (this.agent.observation?.nearbyBlocks || []).filter((block) => block.type === action.block);
+    for (const match of matches) {
+      const [x, y, z] = match.position || match.relative.map((offset, index) => Math.floor([this.bot.location.x, this.bot.location.y, this.bot.location.z][index] + offset));
+      const live = blockAt(this.bot.dimension, { x, y, z });
+      if (!live || live.typeId !== action.block) continue; // already gone: try the next one
+      this.agent.runtime.targetBlock = { x, y, z, type: action.block };
+      setBotStatus(this.bot, BotState.SEARCHING, { target: action.block, distance: match.distance });
+      return this.result(action, true, "Target block located.", { target: this.agent.runtime.targetBlock });
     }
-    const [x, y, z] = match.position || match.relative.map((offset, index) => Math.floor([this.bot.location.x, this.bot.location.y, this.bot.location.z][index] + offset));
-    this.agent.runtime.targetBlock = { x, y, z, type: action.block };
-    setBotStatus(this.bot, BotState.SEARCHING, { target: action.block, distance: match.distance });
-    return this.result(action, true, "Target block located.", { target: this.agent.runtime.targetBlock });
+    // Ask for a fresh snapshot next tick instead of re-reading the same stale one.
+    this.agent.runtime.needsObservation = true;
+    setBotStatus(this.bot, BotState.SEARCHING, { target: action.block });
+    return this.result(action, false, matches.length
+      ? `Every ${action.block} I could see is already gone; looking again.`
+      : `No ${action.block} was found within the observation radius.`);
   }
 
   findEntity(action) {
@@ -119,12 +139,40 @@ export class ActionEngine {
     } catch { return this.result(action, false, "Entity query failed."); }
   }
 
+  /**
+   * Walk to the target. For a block target the destination is a cell the bot can
+   * stand in AND swing from — never the block itself, which is solid: routing at
+   * a log always answered "no walkable path", and that is how a bot gave up on
+   * the top log of a tree it was already standing under (AC-05/AC-14/AC-15).
+   */
   moveToTarget(action) {
     const target = targetPosition(this.agent);
     if (!target) return this.result(action, false, "There is no target to approach.");
     // Vacuum drops while walking so the bot behaves like a player.
     pickupNearbyItems(this.bot, 2.0);
-    const movement = moveEntityTowards(this.bot, target, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 2.0, maxRadius: 28 });
+    const speed = this.agent.combatMode ? MOVEMENT_SPEEDS.sprint : MOVEMENT_SPEEDS.walk;
+    const reachCell = this.agent.runtime.targetBlock === target
+      ? findReachCell(this.bot.dimension, target, this.bot.location)
+      : null;
+    const goal = reachCell ? { x: reachCell.x + 0.5, y: reachCell.y, z: reachCell.z + 0.5 } : target;
+    if (reachCell && navDistance(this.bot.location, goal) <= 0.8) {
+      // Already standing where the swing lands: arrival, not "unreachable".
+      stopEntity(this.bot);
+      setBotStatus(this.bot, BotState.WALKING, { target: target.type || "block", distance: navDistance(this.bot.location, target) });
+      return this.result(action, true, "In reach of the target block.", { arrived: true, distance: navDistance(this.bot.location, target) });
+    }
+    // legDistance: a remembered tree or a search ring can be 40 blocks away,
+    // which is beyond one bounded A* but not beyond walking (AC-06/AC-08).
+    const movement = moveEntityTowards(this.bot, goal, {
+      speed,
+      stopDistance: reachCell ? 0.8 : 2.0,
+      maxRadius: 28,
+      legDistance: 20,
+      // A mining stance has to be exact: the default 1.05-cell arrival tolerance
+      // let the bot declare "Target reached" one cell short of the spot it can
+      // actually swing from, and mine_block then failed on every cycle.
+      tolerance: reachCell ? 0.75 : undefined
+    });
     if (movement.success && movement.arrived) {
       stopEntity(this.bot);
       setBotStatus(this.bot, BotState.WALKING, { target: target.type || "target", distance: movement.distance });
@@ -132,21 +180,35 @@ export class ActionEngine {
     }
     setBotStatus(this.bot, BotState.WALKING, { target: target.type || "target", distance: movement.distance });
     return movement.success
-      ? this.result(action, false, "Moving toward target.", { pending: true, distance: movement.distance })
+      ? this.result(action, false, "Moving toward target.", { pending: true, moving: true, distance: movement.distance })
       : this.result(action, false, movement.reason);
   }
 
+  /**
+   * Follow the owner — AC-08, with AC-09's obstacle handling.
+   *
+   * When the controller has set a detour (the direct line stalled), the bot
+   * walks to the detour point first and only then resumes following the player.
+   * Without that, a bot that hit a wall simply stood there: following has no
+   * plan, so nothing in the plan-failure ladder ever noticed.
+   */
   followPlayer(action) {
     this.agent.runtime.follow = true;
     const owner = this.agent.owner();
     if (!owner) return this.result(action, false, "Owner is not online.");
     pickupNearbyItems(this.bot, 2.0);
+    let detour = this.agent.runtime.followDetour || null;
+    if (detour && navDistance(this.bot.location, detour) < 1.6) {
+      this.agent.runtime.followDetour = null;
+      detour = null;
+    }
+    const aim = detour || owner.location;
     // Follow at sprint speed so the bot keeps up with a walking/sprinting player.
-    const movement = moveEntityTowards(this.bot, owner.location, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: 2.5, maxRadius: 32 });
+    const movement = moveEntityTowards(this.bot, aim, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: detour ? 1.2 : 2.5, maxRadius: 32, legDistance: 24 });
     setBotStatus(this.bot, BotState.FOLLOWING, { target: owner.name, distance: movement.distance });
     return movement.success
-      ? this.result(action, false, "Following owner.", { pending: true })
-      : this.result(action, false, movement.reason);
+      ? this.result(action, false, detour ? "Stepping around an obstacle." : "Following owner.", { pending: true, moving: true, arrived: !detour && movement.arrived === true, detour: Boolean(detour) })
+      : this.result(action, false, movement.reason, { moving: false });
   }
 
   stop(action) {
@@ -166,30 +228,50 @@ export class ActionEngine {
     if (this.agent.runtime.lastMinedKey === key && block && ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"].includes(block.typeId)) {
       this.agent.tasks.addAction(`mined ${action.block} at ${key}`);
       this.agent.runtime.targetBlock = null;
+      // Forget the key: without this the SAME broken cell answered "verified"
+      // every time the plan came round again, and each answer looked like a
+      // freshly mined block (fake progress — the one thing AC-17 forbids).
+      this.agent.runtime.lastMinedKey = "";
       return this.result(action, true, "Block change verified.");
     }
     if (!block || block.typeId !== action.block) {
       this.agent.runtime.targetBlock = null;
       return this.result(action, false, `Target is no longer ${action.block}.`);
     }
-    const distance = Math.hypot(this.bot.location.x - target.x, this.bot.location.y - target.y, this.bot.location.z - target.z);
-    if (distance > 5) return this.result(action, false, "Target is unreachable from the current position.");
-    const axeBlock = /_log$/.test(action.block);
-    const toolCandidates = axeBlock
-      ? ["minecraft:netherite_axe", "minecraft:diamond_axe", "minecraft:iron_axe", "minecraft:stone_axe", "minecraft:wooden_axe", "minecraft:golden_axe"]
-      : ["minecraft:netherite_pickaxe", "minecraft:diamond_pickaxe", "minecraft:iron_pickaxe", "minecraft:stone_pickaxe", "minecraft:wooden_pickaxe", "minecraft:golden_pickaxe"];
+    // Survival reach, measured the way the game measures it: from the eyes
+    // (1.62 m up) to the block centre, about 4.5 m. A flat 5 m radius let the
+    // bot "mine" blocks it could never have swung at (AC-15/AC-32).
+    if (!withinSwingReach(this.bot.location, target)) {
+      return this.result(action, false, "Target is unreachable from the current position.");
+    }
+
+    // --- AC-16 TOOL SELECTION -------------------------------------------------
+    // One shared table answers: which family fits this block, which tier the
+    // block requires, and which of the tools actually in the inventory is best.
+    // The bot keeps an appropriate tool that is already in hand (no pointless
+    // swap, no wasted durability) and refuses — with a sentence the player can
+    // act on — when mining could not legally drop anything (AC-32).
+    const heldIds = readInventory(this.bot).slots.map((item) => item.id);
+    const choice = chooseTool(action.block, heldIds);
     const inventory = readInventory(this.bot);
-    if (!toolCandidates.includes(inventory.selectedItem?.id)) {
-      const available = toolCandidates.find((id) => countItem(this.bot, id) > 0);
-      if (available) equipItem(this.bot, available);
+    const held = inventory.selectedItem?.id || "";
+    if (!isAppropriate(held, action.block) && choice.best) {
+      const swap = equipItem(this.bot, choice.best);
+      if (!swap.success) {
+        this.agent.runtime.lastToolIssue = swap.reason || `Could not equip ${choice.best}.`;
+        return this.result(action, false, `I could not equip ${choice.best}: ${swap.reason || "the equipment slot refused it"}.`);
+      }
+      this.agent.tasks.addAction(`selected ${choice.best} for ${action.block}`);
     }
     const equipped = readInventory(this.bot).selectedItem?.id || "empty hand";
-    if (/diamond_ore|gold_ore|redstone_ore/.test(action.block) && !/iron_pickaxe|diamond_pickaxe|netherite_pickaxe/.test(equipped)) {
-      return this.result(action, false, `A suitable iron-tier pickaxe is required for ${action.block}.`);
+    if (!choice.meetsRequirement) {
+      const message = toolGapMessage(action.block, choice) || `A suitable ${choice.family} is required for ${action.block}.`;
+      this.agent.runtime.lastToolIssue = message;
+      setBotStatus(this.bot, BotState.WAITING, { block: action.block, target: "no suitable tool" });
+      return this.result(action, false, message);
     }
-    if (/iron_ore/.test(action.block) && !/stone_pickaxe|iron_pickaxe|diamond_pickaxe|netherite_pickaxe/.test(equipped)) {
-      return this.result(action, false, `A stone-tier pickaxe is required for ${action.block}.`);
-    }
+    this.agent.runtime.lastToolIssue = "";
+    this.agent.runtime.lastToolUsed = equipped;
     setBotStatus(this.bot, BotState.MINING, { block: action.block, progress: this.agent.progressText() });
     if (this.agent.runtime.lastMinedKey !== key) {
       this.bot.dimension.runCommand(`setblock ${target.x} ${target.y} ${target.z} air destroy`);
@@ -206,13 +288,32 @@ export class ActionEngine {
     return this.result(action, false, "Mining command completed but the block did not change.");
   }
 
+  /**
+   * Pick the drop up — AC-05 step "perform action → verify result" and AC-15.
+   *
+   * Order matters: a player vacuums the items at their feet first and only then
+   * walks to the rest. Walking first meant a drop 2.4 m away — well inside the
+   * pickup radius — needed a path, and when no path existed the bot reported
+   * "no walkable path" while standing on top of the item it had just mined.
+   */
   collectItem(action) {
-    const before = countItem(this.bot, this.agent.currentCollectionItem());
     const wanted = this.agent.currentCollectionItem();
-    let collected = 0;
-    let found = false;
+    const filter = action.item || wanted || null;
+    const before = countItem(this.bot, wanted);
 
-    // Walk toward the nearest matching drop first when it is not already in range.
+    // 1. Vacuum everything already in reach.
+    const vacuum = pickupNearbyItems(this.bot, 3.5, filter);
+    let collected = vacuum.picked;
+    if (!filter) collected += pickupNearbyItems(this.bot, 2.5).picked;
+    const after = countItem(this.bot, wanted);
+    if (collected > 0 || after > before) {
+      this.agent.tasks.addAction(`collected ${Math.max(collected, after - before)} item(s)`);
+      setBotStatus(this.bot, BotState.COLLECTING, { target: wanted, progress: `+${Math.max(0, after - before)}` });
+      return this.result(action, true, "Inventory confirms an item was collected.", { collected: Math.max(collected, after - before) });
+    }
+
+    // 2. Nothing in reach: is there a matching drop worth walking to?
+    let found = false;
     try {
       const items = this.bot.dimension.getEntities({ location: this.bot.location, maxDistance: 12, type: "minecraft:item" });
       let nearest = null;
@@ -220,8 +321,7 @@ export class ActionEngine {
       for (const itemEntity of items) {
         const stack = itemStackFromEntity(itemEntity);
         if (!stack) continue;
-        if (wanted && stack.typeId !== wanted && action.item && stack.typeId !== action.item) continue;
-        if (wanted && stack.typeId !== wanted && !action.item) continue;
+        if (filter && stack.typeId !== filter) continue;
         found = true;
         const d = navDistance(this.bot.location, itemEntity.location);
         if (d < nearestDist) { nearest = itemEntity; nearestDist = d; }
@@ -229,36 +329,19 @@ export class ActionEngine {
       if (nearest && nearestDist > 1.6) {
         const move = moveEntityTowards(this.bot, nearest.location, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 1.2 });
         setBotStatus(this.bot, BotState.COLLECTING, { target: wanted, distance: nearestDist });
-        // No walkable path to the drop: fail the action so the plan can retry
-        // or give up — returning pending here used to hang the task in
-        // COLLECTING forever on an unreachable drop.
+        // No walkable path to the drop: fail the action so the plan can retry or
+        // give up — returning pending here used to hang the task in COLLECTING
+        // forever on an unreachable drop.
         if (!move.success) return this.result(action, false, move.reason || "Dropped item is out of reach.", { distance: nearestDist });
-        return this.result(action, false, "Moving to dropped item.", { pending: true });
+        return this.result(action, false, "Moving to dropped item.", { pending: true, moving: true });
       }
-      // Drop is close enough to vacuum — release movement keys (like a player
-      // who stops walking once the item is in reach).
+      // Close enough to vacuum on the next pass — release the movement keys like
+      // a player who stops walking once the item is in reach.
       stopEntity(this.bot);
     } catch { /* query failed */ }
 
-    // Player-like vacuum pickup.
-    const vacuum = pickupNearbyItems(this.bot, 3.5, action.item || wanted || null);
-    collected += vacuum.picked;
-
-    // Also accept any nearby item if the task does not filter.
-    if (!action.item && !wanted) {
-      const any = pickupNearbyItems(this.bot, 2.5);
-      collected += any.picked;
-    }
-
-    const after = countItem(this.bot, this.agent.currentCollectionItem());
-    setBotStatus(this.bot, BotState.COLLECTING, {
-      target: wanted,
-      progress: `+${Math.max(0, after - before)}`
-    });
-    if (collected > 0 || after > before) {
-      this.agent.tasks.addAction(`collected ${collected} item(s)`);
-      return this.result(action, true, "Inventory confirms an item was collected.", { collected: Math.max(collected, after - before) });
-    }
+    // 3. Nothing to collect (yet).
+    setBotStatus(this.bot, BotState.COLLECTING, { target: wanted, progress: "+0" });
     if (!found && this.agent.runtime.lastMinedAt > Date.now() - 2500) {
       return this.result(action, false, "Waiting for the verified block drop.", { pending: true });
     }
@@ -308,24 +391,77 @@ export class ActionEngine {
         this.bot.location.z - target.location.z
       );
 
-      // Equip best weapon.
+      // Equip the best weapon the bot actually has (AC-23). chooseWeapon() is
+      // the same table the acceptance tests check, so "it fought with a
+      // shovel" cannot happen silently.
       const inventory = readInventory(this.bot);
       const held = String(inventory.selectedItem?.id || "");
       if (!/sword|axe/.test(held)) {
-        const weapon = [
-          "minecraft:netherite_sword", "minecraft:diamond_sword", "minecraft:iron_sword",
-          "minecraft:stone_sword", "minecraft:golden_sword", "minecraft:wooden_sword",
-          "minecraft:netherite_axe", "minecraft:diamond_axe", "minecraft:iron_axe"
-        ].find((id) => countItem(this.bot, id) > 0);
-        if (weapon) equipItem(this.bot, weapon);
+        const weapon = chooseWeapon(inventory.slots.map((item) => item.id));
+        if (weapon) {
+          const swap = equipItem(this.bot, weapon);
+          if (swap.success) this.agent.runtime.lastWeapon = weapon;
+        }
       }
 
-      // Close distance with pathfinder — never freeze out of range.
-      if (distance > 2.8) {
+      // --- AC-24 CREEPER SAFETY ---------------------------------------------
+      // A creeper is not an ordinary target: walking into it kills the bot and
+      // craters the terrain around the player. The bot fights it hit-and-run —
+      // close to arm's length, swing once, then get outside the blast radius
+      // and wait for the fuse to drop before coming back in.
+      if (isCreeperType(target.typeId)) {
+        const sinceStrike = Date.now() - (this.agent.runtime.lastAttackAt || 0);
+        const fused = sinceStrike < CREEPER_FUSE_MS;
+        // (1) Inside the blast radius — whether the fuse is lit or the bot simply
+        //     drifted in — the only correct move is OUT. The old code guarded
+        //     this branch with `!striking`, so a bot that had closed to arm's
+        //     length never backed off: it parked itself two blocks from a lit
+        //     creeper and swung until it died (AC-24).
+        if (distance < CREEPER_SAFE_DISTANCE && (fused || distance < CREEPER_STANDOFF)) {
+          const retreat = awayFrom(this.bot.location, target.location, CREEPER_SAFE_DISTANCE + 2);
+          const backing = moveEntityTowards(this.bot, retreat, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: 1.0, maxRadius: 20 });
+          this.agent.runtime.lastCombatNote = `backing off from the creeper (${Math.round(distance)}m)`;
+          setBotStatus(this.bot, BotState.FLEEING, { target: target.typeId, distance: Math.round(distance) });
+          return this.result(action, false, backing.success ? "Backing away from the creeper." : "Cannot back away from the creeper.", { pending: true, moving: backing.success !== false, defensive: true });
+        }
+        // (2) Outside the blast radius but beyond a swing: close to arm's length
+        //     only. The generic approach below stops at 2.0 blocks, which is
+        //     inside a creeper's ignition range, so creepers get their own.
+        if (distance > CREEPER_STRIKE_RANGE) {
+          setAttackingFlag(this.bot, false);
+          // Aim at a standoff POINT on this side of the creeper, not at the
+          // creeper: routing at the mob itself walks the bot into the ignition
+          // radius and the pathfinder's own arrival slack leaves it there.
+          const across = Math.hypot(this.bot.location.x - target.location.x, this.bot.location.z - target.location.z) || 1;
+          const standoff = {
+            x: target.location.x + ((this.bot.location.x - target.location.x) / across) * CREEPER_STRIKE_RANGE,
+            y: target.location.y,
+            z: target.location.z + ((this.bot.location.z - target.location.z) / across) * CREEPER_STRIKE_RANGE
+          };
+          const movement = moveEntityTowards(this.bot, standoff, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 0.5, maxRadius: 24 });
+          if (!movement.arrived) {
+            this.agent.runtime.lastCombatNote = "closing on the creeper to arm's length";
+            setBotStatus(this.bot, BotState.ATTACKING, { target: target.typeId, distance: Math.round(distance) });
+            return this.result(action, false, movement.success ? "Closing on the creeper." : movement.reason, { pending: true, moving: movement.success !== false });
+          }
+          // (3) At the stance: swing from here. Waiting to be within 3.2 blocks
+          //     of the mob itself deadlocked — the pathfinder considers the
+          //     stance reached at 3.7, so the bot stood just outside its own
+          //     strike condition and never hit the creeper at all.
+        }
+        this.agent.runtime.lastCombatNote = "hit-and-run strike on the creeper";
+      } else {
+        this.agent.runtime.lastCombatNote = "";
+      }
+
+      // Close distance with pathfinder — never freeze out of range. A creeper is
+      // excluded: its stance is handled above, and this generic approach stops
+      // at 2.0 blocks, inside the ignition radius.
+      if (!isCreeperType(target.typeId) && distance > 2.8) {
         setAttackingFlag(this.bot, false);
         const movement = moveEntityTowards(this.bot, target.location, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: 2.0, maxRadius: 24 });
         setBotStatus(this.bot, BotState.ATTACKING, { target: target.typeId, distance });
-        return this.result(action, false, movement.success ? "Closing on hostile target." : movement.reason, { pending: true });
+        return this.result(action, false, movement.success ? "Closing on hostile target." : movement.reason, { pending: true, moving: movement.success !== false });
       }
 
       // Strafe slightly if blocked line of sight.
@@ -342,6 +478,9 @@ export class ActionEngine {
 
       // In range: stand still and swing, like a player fighting at arm's length.
       stopEntity(this.bot);
+      if (isCreeperType(target.typeId) && distance > CREEPER_STRIKE_RANGE + 1.0) {
+        return this.result(action, false, "Creeping back into creeper range.", { pending: true, moving: true });
+      }
       const now = Date.now();
       const cooldown = 500;
       if (!this.agent.runtime.lastAttackAt || now - this.agent.runtime.lastAttackAt > cooldown) {
@@ -457,33 +596,59 @@ export class ActionEngine {
 
   returnHome(action) {
     const owner = this.agent.owner();
-    const target = this.agent.runtime.home || owner?.location;
+    // A "come here" order means come to where the player IS: someone who walks
+    // off while the bot is on its way expects the bot to keep coming, not to
+    // arrive at the empty spot they were standing in (AC-36).
+    const target = this.agent.runtime.cameTo && owner
+      ? owner.location
+      : (this.agent.runtime.home || owner?.location);
     if (!target) return this.result(action, false, "Home or owner location is unavailable.");
     pickupNearbyItems(this.bot, 2.0);
-    const movement = moveEntityTowards(this.bot, target, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: 2.5, maxRadius: 32 });
+    // Home can be a long walk; legs keep the bounded search from calling it
+    // unreachable just because it is beyond one A* (AC-06/AC-08).
+    const movement = moveEntityTowards(this.bot, target, { speed: MOVEMENT_SPEEDS.sprint, stopDistance: 2.5, maxRadius: 32, legDistance: 24 });
     setBotStatus(this.bot, BotState.RETURNING, { target: owner?.name || "home", distance: movement.distance });
-    return movement.success && movement.arrived
-      ? this.result(action, true, "Returned.")
-      : this.result(action, false, movement.reason || "Returning.", { pending: true });
+    if (movement.success && movement.arrived) return this.result(action, true, "Returned.");
+    return this.result(action, false, movement.reason || "Returning.", { pending: true, moving: movement.success !== false });
   }
 
+  /**
+   * Walk to a point and look around — the engine half of a search (AC-13).
+   *
+   * Two details matter. Directions come from a golden-angle counter rather than
+   * the clock, so consecutive explores cover different ground instead of
+   * re-rolling nearly the same bearing. And a point that cannot be reached —
+   * inside a hill, across a ravine — must NOT pend forever: that froze the bot
+   * mid-search with "Exploring" on its status line and no plan failure to break
+   * the deadlock (AC-09).
+   */
   explore(action) {
     if (!this.agent.runtime.exploreTarget) {
-      const angle = (Date.now() / 1000) % (Math.PI * 2);
+      const turn = (this.agent.runtime.exploreTurn = ((this.agent.runtime.exploreTurn || 0) + 1) * 2.399963229728653);
       this.agent.runtime.exploreTarget = {
-        x: this.bot.location.x + Math.cos(angle) * 14,
+        x: this.bot.location.x + Math.cos(turn) * 14,
         y: this.bot.location.y,
-        z: this.bot.location.z + Math.sin(angle) * 14
+        z: this.bot.location.z + Math.sin(turn) * 14
       };
     }
     pickupNearbyItems(this.bot, 2.0);
-    const movement = moveEntityTowards(this.bot, this.agent.runtime.exploreTarget, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 2, maxRadius: 24 });
+    const movement = moveEntityTowards(this.bot, this.agent.runtime.exploreTarget, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 2, maxRadius: 24, legDistance: 18 });
     setBotStatus(this.bot, BotState.EXPLORING, { distance: movement.distance });
     if (movement.success && movement.arrived) {
       this.agent.runtime.exploreTarget = null;
+      this.agent.runtime.exploreRetries = 0;
       return this.result(action, true, "Exploration point reached.");
     }
-    return this.result(action, false, movement.reason || "Exploring.", { pending: true });
+    if (!movement.success) {
+      const retries = (this.agent.runtime.exploreRetries = (this.agent.runtime.exploreRetries || 0) + 1);
+      this.agent.runtime.exploreTarget = null; // pick a new bearing next tick
+      if (retries > 3) {
+        this.agent.runtime.exploreRetries = 0;
+        return this.result(action, false, movement.reason || "Exploration point unreachable.");
+      }
+      return this.result(action, false, "That way is blocked; trying another direction.", { pending: true });
+    }
+    return this.result(action, false, movement.reason || "Exploring.", { pending: true, moving: true });
   }
 
   build(action) {

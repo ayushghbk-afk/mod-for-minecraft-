@@ -194,8 +194,29 @@ export class Dimension {
     entity.components.set("minecraft:item", { itemStack: stack });
     return entity;
   }
+  /**
+   * Entity queries honour the filters — including `location` + `maxDistance`,
+   * which the real API applies and this stub used to ignore. Ignoring them let
+   * tests pass where the shipped code would have found nothing (or everything):
+   * a drop 4 m behind a wall was "in pickup range" because the query returned
+   * every item in the dimension.
+   */
   getEntities(filter = {}) {
-    return this.entities.filter((entity) => entity.isValid && (!filter.type || entity.typeId === filter.type));
+    return this.entities.filter((entity) => {
+      if (!entity.isValid) return false;
+      if (filter.type && entity.typeId !== filter.type) return false;
+      if (filter.excludeTypes?.includes(entity.typeId)) return false;
+      if (filter.location) {
+        const dx = entity.location.x - filter.location.x;
+        const dy = entity.location.y - filter.location.y;
+        const dz = entity.location.z - filter.location.z;
+        const dist = Math.hypot(dx, dy, dz);
+        if (Number.isFinite(filter.maxDistance) && dist > filter.maxDistance) return false;
+        if (Number.isFinite(filter.minDistance) && dist < filter.minDistance) return false;
+      }
+      if (filter.tags?.length && !filter.tags.every((tag) => typeof entity.hasTag === "function" && entity.hasTag(tag))) return false;
+      return true;
+    });
   }
   getPlayers() { return this.entities.filter((entity) => entity.typeId === "minecraft:player" && entity.isValid); }
   runCommand(command) { this.commands.push(command); return { successCount: 1 }; }

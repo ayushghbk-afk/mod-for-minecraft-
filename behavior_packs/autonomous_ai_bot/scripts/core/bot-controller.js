@@ -1,19 +1,50 @@
 import { world } from "@minecraft/server";
 import { DEFAULT_CONFIG, loadConfig, saveConfig } from "./config.js";
 import { ActionEngine } from "./action-engine.js";
-import { validatePlan } from "./action-validator.js";
-import { makeObservation } from "./observation.js";
+import { ALLOWED_BLOCKS, validatePlan } from "./action-validator.js";
+import { parseItemRequest } from "./intent-parser.js";
+import { HINT_FOR_BLOCK, isCreeperType, isHostileType, makeObservation, observedCount } from "./observation.js";
 import { MemoryStore } from "./memory.js";
-import { TaskManager, TaskStatus } from "./task-manager.js";
-import { countItem, equipItem, pickupNearbyItems, readInventory, tryEatBestFood, useItem } from "./inventory.js";
+import { TaskManager, TaskStatus, taskKey } from "./task-manager.js";
+import { countItem, equipItem, FOOD_ITEMS, itemName, pickupNearbyItems, readInventory, tryEatBestFood, useItem } from "./inventory.js";
 import { BotState, readBotStatus, setBotStatus } from "./status.js";
 import { fallbackPlan, safeFallback } from "./planner.js";
 import { providerFor } from "./ai-provider.js";
 import { applyPlayerStep, clearRoute, isSafeCell, StuckDetector, stopEntity } from "./navigation.js";
 import { validateNamedCommand, canUseBot } from "./permissions.js";
 import { commandHint, talkHint, noBotMessage } from "./hints.js";
+import { assess, Behavior, evaluateCommand, HEALTH, priorityName, Priority } from "./priority.js";
+import { explainFailure, Reporter } from "./reporter.js";
+import { chooseTool, chooseWeapon, toolGapMessage } from "./tools.js";
 
 const BOT_ENTITY_ID = "aibot:companion";
+/**
+ * AC-09 follow ladder, in ticks (20/s). Sidesteps are spaced so the bot has
+ * time to actually walk the detour before the next one is chosen; the give-up
+ * report comes ~18 s in, which is long enough to be sure and short enough that
+ * a player is not left wondering whether the mod died.
+ */
+const FOLLOW_SIDESTEPS = [40, 120, 200, 280];
+const FOLLOW_GIVE_UP_TICKS = 360;
+/**
+ * How many places a bot looks before it admits defeat (AC-13/AC-32). Eight is
+ * the point where the rings it walks (10, 14, 18 … blocks out) cover roughly
+ * the 32-block observation span twice over, so "not here" is a real answer and
+ * not an early one. Bounded on purpose: an unbounded search is the loop the old
+ * re-plan-on-failure code produced.
+ */
+const MAX_SEARCH_ATTEMPTS = 8;
+/** Golden angle in radians — each search ring points somewhere genuinely new. */
+const SEARCH_TURN = 2.399963229728653;
+/** A task that never gains progress after this many plan cycles is failed. */
+const MAX_PROGRESSLESS_CYCLES = 6;
+/**
+ * Blocks the bot is allowed to break. It is the SAME allowlist the AI plan
+ * validator enforces (AC-39/AC-40): one list, so a player command can never
+ * target something an AI plan could not, and neither can ever reach bedrock, a
+ * command block or a player's build.
+ */
+const ALLOWED_MINE_BLOCKS = ALLOWED_BLOCKS;
 /**
  * A no-op stand-in for the test-mode harness. main.js replaces
  * `controller.test` with a real TestMode instance, but agents are also built by
@@ -94,9 +125,8 @@ function relocateToSafeCell(entity) {
   return false;
 }
 function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
-function isHostile(type) {
-  return /zombie|husk|drowned|skeleton|stray|creeper|spider|cave_spider|witch|enderman|phantom|pillager|vindicator|ravager|slime|magma_cube|blaze|ghast|piglin|hoglin|warden|guardian|shulker|vex|evoker/.test(String(type || ""));
-}
+/** One classifier for the whole pack — see observation.isHostileType (AC-22). */
+const isHostile = isHostileType;
 function isValidEntity(entity) {
   try { return Boolean(entity && entity.isValid === true); } catch (error) { return false; }
 }
@@ -113,6 +143,11 @@ class BotAgent {
     this.memory = new MemoryStore(this.readJson("aibot:memory", null));
     this.observation = null;
     this.engine = new ActionEngine(this);
+    /**
+     * Chat reporting (AC-31/AC-32). One reporter per bot: two bots must not
+     * share a throttle, or the second bot's progress lines get swallowed.
+     */
+    this.reporter = new Reporter(this);
     this.runtime = {
       plan: null, planIndex: 0, targetBlock: null, targetPosition: null, entityTarget: null,
       combatTarget: null, chest: null, follow: false, home: this.readPosition(),
@@ -120,7 +155,20 @@ class BotAgent {
       lastAttackAt: 0, returningAfterTask: false, stuck: new StuckDetector(), exploreTarget: null,
       aiErrorShown: false, lastPersistAt: 0, tick: 0, lastAction: null, lastPlan: null,
       lastAIRequest: "none", lastAIResponse: "none", lastValidation: "not run", lastPlanReason: "none", inventoryFullReturn: false,
-      tickFailures: 0, lastFollowResult: "not running"
+      tickFailures: 0, lastFollowResult: "not running",
+      // --- priority / survival bookkeeping (AC-20, AC-21, AC-25, AC-29) ---
+      /** @type {{level:number,name:string,behavior:string,reason:string,threat?:any,candidates?:any[]}} */
+      priority: { level: Priority.IDLE, name: "IDLE", behavior: Behavior.IDLE, reason: "no decision yet" },
+      cameTo: null, lastCommandVerdict: "none", needsObservation: false,
+      searchAttempts: 0, searchOrigin: null, searchBlock: "", noProgressCycles: 0,
+      followDetour: null, followBlocked: 0,
+      lastEatAttempt: 0, noFoodReported: false, survivalSince: 0, survivalReason: "",
+      resumedFromSurvival: false, lastCombatNote: "", lastWeapon: "", lastToolUsed: "", lastToolIssue: "",
+      // --- AC-28: what the interrupted task was, so it can be resumed or
+      //     explicitly abandoned with a reason instead of silently vanishing.
+      interruption: null,
+      // --- AC-41: per-bot cost counters, reported by /aibot:info.
+      scans: 0, scannedCells: 0, scannedEntities: 0, scanMs: 0, chatLines: 0, replans: 0
     };
     this.status = readBotStatus(entity);
     this.setName();
@@ -159,6 +207,7 @@ class BotAgent {
     if (player) targets.add(player);
     if (owner) targets.add(owner);
     if (!targets.size) return;
+    this.runtime.chatLines += 1;
     for (const target of targets) {
       try { target.sendMessage(text); } catch { /* left */ }
     }
@@ -278,21 +327,149 @@ class BotAgent {
     }
   }
 
-  createCollectTask(block, target, goal) {
+  /**
+   * Create (or refuse) a collection objective — AC-04, AC-19, AC-27.
+   *
+   * `target` is an ABSOLUTE inventory count: asking for 16 oak logs while
+   * holding 12 produces "12/16, still needed: 4", not a hunt for 16 more.
+   * Asking for something already held completes immediately instead of sending
+   * the bot out for a pointless trip, and asking for the same objective that is
+   * already finished is reported as finished rather than recreated.
+   *
+   * @param {string} block a Bedrock block id, e.g. "minecraft:oak_log"
+   * @param {number} target how many of the resulting item the bot should hold
+   * @param {string} [goal] the sentence shown to the player
+   * @param {{kind?: string, silent?: boolean}} [options]
+   */
+  createCollectTask(block, target, goal, options = {}) {
+    const kind = options.kind || "collect";
     const item = DROP_FOR_BLOCK[block] || block;
-    const current = countItem(this.entity, item);
-    const task = this.tasks.create({ goal, kind: "collect", block, target, startingCount: current });
-    this.memory.playerRequest(goal);
-    this.memory.event(`Task created: ${goal}`);
+    const held = countItem(this.entity, item);
+    const wanted = Math.max(1, Math.min(64, Number(target) || 1));
+    const title = goal || `Collect ${wanted} ${item.replace(/^minecraft:/, "").replace(/_/g, " ")}`;
+    const key = taskKey({ kind, block, target: wanted });
+
+    // AC-19: the requirement is already satisfied. Say so with the real number
+    // instead of creating work, and remember it so the same order is not
+    // quietly re-run (AC-27).
+    if (held >= wanted) {
+      const task = this.tasks.create({ goal: title, kind, block, target: wanted, startingCount: held });
+      this.memory.playerRequest(title);
+      this.memory.archiveTask(task);
+      this.memory.fact(`Already holding ${held} ${item.replace(/^minecraft:/, "").replace(/_/g, " ")} — "${title}" needed nothing.`);
+      this.memory.event(`Task "${title}" complete on arrival: already holding ${held}/${wanted}.`);
+      this.runtime.follow = false;
+      this.runtime.plan = null;
+      this.runtime.targetBlock = null;
+      setBotStatus(this.entity, BotState.IDLE);
+      this.reporter.reset();
+      this.say(`§aI already have ${held}/${wanted} ${item.replace(/^minecraft:/, "").replace(/_/g, " ")}§r — nothing to collect.`);
+      this.persist(true);
+      return task;
+    }
+
+    // AC-27: an objective that was already finished is remembered and named.
+    // The order still runs — the player may have spent the items and genuinely
+    // wants another batch — but it is acknowledged rather than silently re-run,
+    // which is the difference between a bot that remembers and one that does not.
+    const repeated = this.tasks.isRepeatOfCompleted({ kind, block, target: wanted });
+
+    const task = this.tasks.create({ goal: title, kind, block, target: wanted, startingCount: held, priority: Priority.PLAYER_COMMAND });
+    this.memory.playerRequest(title);
+    if (repeated) this.memory.event(`Repeat order: "${title}" was completed before; running it again.`, "task");
+    this.memory.event(`Task created: ${title} (holding ${held}/${wanted})`);
     this.runtime.follow = false;
     this.runtime.returningAfterTask = false;
     this.runtime.plan = null;
     this.runtime.targetBlock = null;
+    this.runtime.planFailures = 0;
+    this.runtime.noProgressCycles = 0;
+    this.runtime.searchAttempts = 0;
+    this.runtime.searchOrigin = null;
+    this.runtime.searchBlock = "";
+    this.runtime.interruption = null;
+    this.runtime.replans = 0;
     this.runtime.stuck.reset();
-    this.say(`§aOn it.§r ${goal} — I'll path there, mine, and pick up the drops. Progress 0/${target}.`);
+    this.reporter.reset();
+
+    // AC-04: the objective card, so the player can see the task is persistent
+    // and identifiable rather than a vague acknowledgement.
+    const seen = observedCount(this.observation, block);
+    this.say([
+      "§aOn it.§r",
+      this.tasks.describe().replace(/\n/g, "\n§7"),
+      `§7Holding now: ${held} · still needed: ${wanted - held}${seen ? ` · ${seen} visible nearby` : " · none visible yet, I'll search"}.`,
+      repeated ? "§7(Done this one before — doing it again.)" : ""
+    ].filter(Boolean).join("\n"));
+    this.reporter.progress({ progress: task.progress, target: task.target, block: item, force: true });
+    setBotStatus(this.entity, BotState.THINKING, { target: title });
     this.requestPlan("new player task");
     this.persist(true);
     return task;
+  }
+
+  /**
+   * `/bot mine stone` — AC-14. Mining is a collection task whose item is the
+   * block's drop, plus an up-front tool check so an impossible request is
+   * refused in words instead of failing four times silently.
+   */
+  mineTask(block, target = 8, goal = "") {
+    const id = String(block || "").toLowerCase();
+    const normalised = id.includes(":") ? id : `minecraft:${id}`;
+    const item = DROP_FOR_BLOCK[normalised] || normalised;
+    const heldIds = readInventory(this.entity).slots.map((entry) => entry.id);
+    const choice = chooseTool(normalised, heldIds);
+    const title = goal || `Mine ${target} ${normalised.replace(/^minecraft:/, "").replace(/_/g, " ")}`;
+    if (!choice.meetsRequirement) {
+      const message = toolGapMessage(normalised, choice) || `I need a better ${choice.family} for that.`;
+      this.memory.event(`Refused "${title}": ${message}`, "error");
+      this.say(`§c${message}§r`);
+      return null;
+    }
+    return this.createCollectTask(normalised, target, title, { kind: "mine" });
+  }
+
+  /** AC-04/AC-34: the objective card plus the live reason for the current state. */
+  taskText() {
+    const task = this.tasks.current;
+    const lines = [this.tasks.describe()];
+    if (task) {
+      const item = DROP_FOR_BLOCK[task.block] || task.block;
+      lines.push(`Holding: ${countItem(this.entity, item)} ${String(item || "").replace(/^minecraft:/, "")}`);
+      lines.push(`Priority: ${this.runtime.priority.name} (${this.runtime.priority.behavior}) — ${this.runtime.priority.reason}`);
+      if (task.status === TaskStatus.PAUSED && this.runtime.interruption) lines.push(`Will resume after: ${this.runtime.interruption}`);
+      if (this.runtime.lastToolIssue) lines.push(`Tool: ${this.runtime.lastToolIssue}`);
+      if (this.runtime.lastAction) lines.push(`Last action: ${this.runtime.lastAction.action} → ${this.runtime.lastAction.success ? "ok" : (this.runtime.lastAction.reason || "failed")}`);
+    }
+    const done = this.memory.snapshot().completedTasks.slice(-3).map((entry) => `${entry.goal} (${entry.progress}/${entry.target})`);
+    if (done.length) lines.push(`Recently finished: ${done.join(", ")}`);
+    return lines.join("\n");
+  }
+
+  /**
+   * Eat on request (and the fallback half of AC-21): try once, report the
+   * outcome, and never retry in a loop. With no food the bot says so and keeps
+   * doing whatever it was doing at a safer distance.
+   */
+  eatOnDemand(player = null) {
+    const health = this.healthSnapshot();
+    if (!this.hasFood()) {
+      this.runtime.noFoodReported = true;
+      this.memory.fact("No food in inventory — cannot self-heal.");
+      this.say(`§cI have no food§r (${Math.ceil(health.current)}/${Math.ceil(health.max)} HP). Drop me something edible and I'll recover on my own.`, player);
+      return { success: false, reason: "No food in inventory." };
+    }
+    this.runtime.lastEatAttempt = Date.now();
+    const ate = tryEatBestFood(this.entity);
+    if (ate.success) {
+      this.runtime.noFoodReported = false;
+      setBotStatus(this.entity, BotState.EATING, { target: ate.used });
+      this.memory.event(`Ate ${ate.used} on request at ${Math.ceil(health.current)}/${Math.ceil(health.max)} health.`, "recovery");
+      this.say(`§eAte ${String(ate.used).replace(/^minecraft:/, "").replace(/_/g, " ")}.§r`, player);
+      return ate;
+    }
+    this.say(`I couldn't eat: ${ate.reason || "not hungry enough"}.`, player);
+    return ate;
   }
 
   /** Use / equip an item from inventory like a player. */
@@ -306,25 +483,80 @@ class BotAgent {
     return result;
   }
 
+  /**
+   * AC-30: every player directive goes through this first. It returns the
+   * verdict (interrupt or not) and records it, so the bot can *explain* why it
+   * ignored or replaced what it was doing instead of looking arbitrary.
+   */
+  evaluatePlayerCommand(command, { announce = true } = {}) {
+    const verdict = evaluateCommand(command, this.runtime.priority);
+    this.runtime.lastCommandVerdict = `${command}: ${verdict.reason}`;
+    this.memory.event(`Command "${command}" — ${verdict.reason}`, "command");
+    if (announce && !verdict.interrupt && verdict.kind === "directive") {
+      this.say(`§eNot yet§r — ${verdict.reason}.`);
+    }
+    return verdict;
+  }
+
   follow() {
+    const verdict = this.evaluatePlayerCommand("follow", { announce: false });
+    if (!verdict.interrupt) return verdict;
     this.runtime.follow = true;
+    this.runtime.followDetour = null;
+    this.runtime.followBlocked = 0;
     this.runtime.plan = null;
     this.runtime.planIndex = 0;
+    this.runtime.interruption = null;
     this.runtime.stuck.reset();
+    // A follow order supersedes an active collection task, and the player is
+    // told the task is paused rather than watching it disappear (AC-28).
+    if (this.tasks.current?.status === TaskStatus.ACTIVE) {
+      this.tasks.pause("Player asked me to follow.");
+      this.runtime.interruption = "follow order";
+      this.say(`Following you. Task paused at ${this.progressText()} — say "resume" to finish it.`);
+    } else {
+      this.say("Following you.");
+    }
     setBotStatus(this.entity, BotState.FOLLOWING, { target: this.ownerName || "owner" });
-    this.say("Following you.");
+    this.persist(true);
+    return verdict;
   }
+
   stop() {
+    this.evaluatePlayerCommand("stop", { announce: false });
     this.runtime.follow = false;
     this.runtime.plan = null;
+    this.runtime.planIndex = 0;
     this.runtime.combatTarget = null;
+    this.runtime.entityTarget = null;
+    this.runtime.targetBlock = null;
+    this.runtime.exploreTarget = null;
+    this.runtime.followDetour = null;
+    this.runtime.followBlocked = 0;
+    // Without this the tick loop re-created the "Return to player" plan on the
+    // very next run: the bot said "Stopped. I'm standing by." and then walked
+    // off, because finishing a task had armed the return-home flag and stop()
+    // only disarmed the plan it could see (AC-33/AC-44).
+    this.runtime.returningAfterTask = false;
+    this.runtime.stuck.reset();
     stopEntity(this.entity);
     try {
       if (typeof this.entity.setProperty === "function") this.entity.setProperty("aibot:attacking", false);
     } catch { /* optional */ }
-    if (this.tasks.current?.status === TaskStatus.ACTIVE) this.tasks.pause("Stopped by player.");
-    setBotStatus(this.entity, BotState.IDLE);
-    this.say("Stopped. Current task is paused.");
+    const task = this.tasks.current;
+    // AC-33: stop must immediately end the *acting*, and it must be obvious
+    // afterwards what state the task is in. Progress is preserved (AC-26) and
+    // the player is told how to continue or drop it.
+    if (task?.status === TaskStatus.ACTIVE || task?.status === TaskStatus.PAUSED) {
+      this.tasks.pause("Stopped by player.");
+      this.runtime.interruption = "player stop";
+      setBotStatus(this.entity, BotState.IDLE);
+      this.say(`Stopped. Task paused at ${this.progressText()} — §f${commandHint(this.controller, "resume")}§r continues it, §f${commandHint(this.controller, "cancel")}§r drops it.`);
+    } else {
+      setBotStatus(this.entity, BotState.IDLE);
+      this.say("Stopped. I'm standing by.");
+    }
+    this.memory.event("Stopped by player; task state preserved.", "command");
     this.persist(true);
   }
   resume() {
@@ -345,6 +577,7 @@ class BotAgent {
     this.persist(true);
   }
   protect() {
+    this.evaluatePlayerCommand("protect", { announce: false });
     this.runtime.follow = false;
     this.config.combatMode = "defend_owner";
     this.runtime.plan = { goal: "Defend owner", thought: "Deterministic threat response.", actions: [{ type: "defend_player" }] };
@@ -353,21 +586,74 @@ class BotAgent {
     this.say("Defending you. I'll path to hostiles and fight.");
   }
   returnHome() {
+    this.evaluatePlayerCommand("come", { announce: false });
     this.runtime.follow = false;
     this.runtime.plan = { goal: "Return to owner", thought: "Deterministic return.", actions: [{ type: "return_home" }] };
     this.runtime.planIndex = 0;
     this.runtime.returningAfterTask = false;
-    this.say("Coming back to you.");
+    // A "come here" order outranks a collection task; the task is parked with a
+    // reason rather than dropped, so progress survives the walk back (AC-28).
+    if (this.tasks.current?.status === TaskStatus.ACTIVE) {
+      this.tasks.pause("Player called me back.");
+      this.runtime.interruption = "come/return order";
+      this.say(`Coming back to you. Task paused at ${this.progressText()}.`);
+    } else {
+      this.say("Coming back to you.");
+    }
+    const owner = this.owner();
+    if (owner) this.runtime.home = owner.location;
+    this.persist(true);
+  }
+
+  /**
+   * AC-36 `/bot come`: walk to the player who asked. Identical mechanics to
+   * return_home, but the destination is the *requesting* player (who may not be
+   * the owner when ownerOnly is off) and the target is refreshed as they move.
+   */
+  comeTo(player) {
+    const who = player && player.typeId === "minecraft:player" ? player : this.owner();
+    if (!who) {
+      this.say("I can't see you — come closer and ask again.");
+      return false;
+    }
+    this.evaluatePlayerCommand("come", { announce: false });
+    this.runtime.follow = false;
+    this.runtime.returningAfterTask = false;
+    this.runtime.cameTo = { id: String(who.id), name: String(who.name || "") };
+    this.runtime.plan = { goal: `Come to ${who.name || "player"}`, thought: "Player asked me to come.", actions: [{ type: "return_home" }] };
+    this.runtime.planIndex = 0;
+    this.runtime.home = who.location;
+    if (this.tasks.current?.status === TaskStatus.ACTIVE) {
+      this.tasks.pause("Player called me over.");
+      this.runtime.interruption = "come order";
+    }
+    setBotStatus(this.entity, BotState.RETURNING, { target: who.name || "player" });
+    const pausedAt = this.progressText();
+    this.say(`Coming to you${pausedAt ? ` — task paused at ${pausedAt}` : ""}.`);
+    this.persist(true);
+    return true;
   }
   cancel() {
+    this.evaluatePlayerCommand("cancel", { announce: false });
+    const task = this.tasks.current;
     this.tasks.cancel();
     this.runtime.plan = null;
+    this.runtime.planIndex = 0;
     this.runtime.follow = false;
     this.runtime.combatTarget = null;
+    this.runtime.entityTarget = null;
+    this.runtime.targetBlock = null;
+    this.runtime.exploreTarget = null;
+    this.runtime.followDetour = null;
+    this.runtime.followBlocked = 0;
+    this.runtime.returningAfterTask = false;
+    this.runtime.stuck.reset();
     stopEntity(this.entity);
     setBotStatus(this.entity, BotState.IDLE);
-    this.memory.event("Current task cancelled.");
-    this.say("Task cancelled.");
+    this.memory.event(`Task cancelled${task ? `: ${task.goal} at ${task.progress}/${task.target}` : ""}.`, "command");
+    this.runtime.interruption = null;
+    this.reporter.reset();
+    this.say(`Task cancelled${task ? ` at ${task.progress}/${task.target}` : ""}. I'm idle.`);
     this.persist(true);
   }
 
@@ -398,37 +684,171 @@ class BotAgent {
     } catch { return null; }
   }
 
-  handleCombat() {
+  /** Health as a plain {current,max} pair the priority system can read. */
+  healthSnapshot() {
+    try {
+      const health = this.entity.getComponent("minecraft:health");
+      if (!health) return { current: 20, max: 20 };
+      const max = Number(health.effectiveMax ?? health.defaultValue ?? 20) || 20;
+      return { current: Number(health.currentValue ?? max), max };
+    } catch { return { current: 20, max: 20 }; }
+  }
+
+  /** True when the bot is carrying anything edible (AC-20/AC-21). */
+  hasFood() {
+    try {
+      const held = readInventory(this.entity).slots.map((item) => item.id);
+      return FOOD_ITEMS.some(([id]) => held.includes(id));
+    } catch { return false; }
+  }
+
+  /**
+   * Threats as the priority system wants them: nearest first, from the LAST
+   * OBSERVATION only (AC-13 — no threat that was not actually seen).
+   */
+  threatList() {
+    const threats = this.observation?.threats || [];
+    return threats.map((threat) => ({ typeId: threat.type, distance: threat.distance, creeper: threat.creeper, id: threat.id }));
+  }
+
+  /**
+   * Enter survival mode once: pause the task with a reason the player can see
+   * (AC-20, AC-28) instead of letting the task silently rot while the bot runs.
+   */
+  enterSurvival(reason) {
+    if (this.runtime.survivalSince) {
+      this.runtime.survivalReason = reason;
+      return false;
+    }
+    this.runtime.survivalSince = Date.now();
+    this.runtime.survivalReason = reason;
+    const task = this.tasks.current;
+    if (task?.status === TaskStatus.ACTIVE) {
+      this.tasks.pause(`Survival: ${reason}`);
+      this.runtime.interruption = `survival (${reason})`;
+      this.runtime.plan = null;
+      this.runtime.targetBlock = null;
+      this.memory.event(`Task paused for survival: ${reason} (progress ${task.progress}/${task.target} kept)`, "recovery");
+      this.reporter.event("survival", `§c⚠ ${reason[0].toUpperCase()}${reason.slice(1)} — task paused at ${task.progress}/${task.target}.§r`);
+    }
+    return true;
+  }
+
+  /**
+   * Leave survival mode: resume exactly what was interrupted, or say why it was
+   * abandoned (AC-28 wants an intentional state, never a randomly lost one).
+   */
+  exitSurvival() {
+    if (!this.runtime.survivalSince) return false;
+    const seconds = Math.round((Date.now() - this.runtime.survivalSince) / 1000);
+    this.runtime.survivalSince = 0;
+    this.runtime.survivalReason = "";
+    const task = this.tasks.current;
+    if (task?.status === TaskStatus.PAUSED && /^Survival:/.test(String(task.interruption?.reason || ""))) {
+      if (this.entityInventoryIsFull()) {
+        this.memory.event(`Survival over, but the inventory is still full — task stays paused.`, "recovery");
+        this.reporter.event("resume-blocked", "§eI'm safe again, but my inventory is full — store items and tell me to resume.§r");
+        return true;
+      }
+      this.tasks.resume();
+      this.runtime.interruption = null;
+      this.runtime.plan = null;
+      this.runtime.targetBlock = null;
+      this.memory.event(`Survival ended after ${seconds}s; resuming "${task.goal}" at ${task.progress}/${task.target}.`, "recovery");
+      this.reporter.event("resume", `§aSafe again — resuming ${task.goal} at ${task.progress}/${task.target}.§r`);
+      this.requestPlan("resumed after survival");
+      this.persist(true);
+    }
+    return true;
+  }
+
+  /**
+   * AC-20 / AC-21 / AC-25 — survival beats every ordinary task.
+   * Returns true when survival consumed this tick.
+   */
+  handleSurvival(decision) {
+    const health = this.healthSnapshot();
+    const max = health.max || 20;
+
+    if (decision.behavior === Behavior.FLEE) {
+      const threat = decision.threat || this.threatList()[0] || null;
+      const why = threat ? `fleeing ${String(threat.typeId).replace("minecraft:", "")}` : "fleeing danger";
+      this.enterSurvival(why);
+      const source = threat ? this.resolveEntity(threat.id) : null;
+      const from = source?.location || this.entity.location;
+      // Run directly away, far enough that a re-plan is worth doing.
+      const away = {
+        x: this.entity.location.x + (this.entity.location.x - from.x) * 3 + (this.entity.location.x === from.x ? 6 : 0),
+        y: this.entity.location.y,
+        z: this.entity.location.z + (this.entity.location.z - from.z) * 3 + (this.entity.location.z === from.z ? 6 : 0)
+      };
+      this.runtime.targetPosition = away;
+      this.runtime.combatTarget = null;
+      this.runtime.entityTarget = null;
+      try { this.engine.execute({ type: "move_to_target" }); } catch { /* steering is best effort */ }
+      setBotStatus(this.entity, BotState.FLEEING, { target: threat?.typeId || "danger", distance: threat?.distance ?? 0 });
+      return true;
+    }
+
+    if (decision.behavior === Behavior.EAT) {
+      // A cooldown, not a per-tick attempt: eating is a 1.6 s animation in game
+      // and hammering useItem every tick is the "infinite eating loop" AC-21
+      // forbids. With no food this branch is never even reached, because
+      // assess() only proposes EAT when hasFood is true.
+      const now = Date.now();
+      if (now - this.runtime.lastEatAttempt < 4000) return false;
+      this.runtime.lastEatAttempt = now;
+      const ate = tryEatBestFood(this.entity);
+      if (ate.success) {
+        this.runtime.noFoodReported = false;
+        this.memory.event(`Ate ${ate.used} at ${Math.ceil(health.current)}/${Math.ceil(max)} health.`, "recovery");
+        this.reporter.event("eat", `§eAte ${String(ate.used).replace(/^minecraft:/, "").replace(/_/g, " ")} — ${Math.ceil(health.current)}/${Math.ceil(max)} health.§r`);
+        setBotStatus(this.entity, BotState.EATING, { target: ate.used });
+        return true;
+      }
+      this.test.note("eat", `refused: ${ate.reason || "unknown"}`, { level: "warn", context: this.name });
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * AC-21: hurt and holding nothing edible is reported ONCE, then the bot picks
+   * a fallback (keep working at distance / stay near the owner) instead of
+   * retrying "eat" forever.
+   */
+  reportMissingFood(health, hasFood) {
+    const hurt = health.max > 0 && health.current / health.max <= HEALTH.EAT;
+    if (hurt && !hasFood && !this.runtime.noFoodReported) {
+      this.runtime.noFoodReported = true;
+      this.memory.fact("No food in inventory — cannot self-heal.");
+      this.reporter.event("no-food", `§cI have no food,§r so I can't heal (${Math.ceil(health.current)}/${Math.ceil(health.max)} HP). I'll keep out of trouble — drop me something to eat and I'll recover.`);
+      return true;
+    }
+    if (!hurt && this.runtime.noFoodReported) this.runtime.noFoodReported = false;
+    return false;
+  }
+
+  /** Look an observed entity up again, so combat acts on a live reference. */
+  resolveEntity(id) {
+    if (id === undefined || id === null) return null;
+    try {
+      const found = this.entity.dimension.getEntities({ location: this.entity.location, maxDistance: 24 }).find((candidate) => String(candidate.id) === String(id));
+      return found && isValidEntity(found) ? found : null;
+    } catch { return null; }
+  }
+
+  handleCombat(decision) {
     // Drop a stale combat target that unloaded or died.
     if (this.runtime.combatTarget && !isValidEntity(this.runtime.combatTarget)) {
       this.runtime.combatTarget = null;
       this.runtime.entityTarget = null;
     }
-    const target = isValidEntity(this.runtime.combatTarget) ? this.runtime.combatTarget : this.findThreat();
-    let ownHealth;
-    try { ownHealth = this.entity.getComponent("minecraft:health"); } catch { ownHealth = null; }
-
-    // Eat when hurt — player-like item use.
-    if (ownHealth && ownHealth.currentValue <= Math.max(8, ownHealth.effectiveMax * 0.45)) {
-      const ate = tryEatBestFood(this.entity);
-      if (ate.success) {
-        this.memory.event(`Ate ${ate.used} at ${Math.ceil(ownHealth.currentValue)} health.`, "recovery");
-        setBotStatus(this.entity, BotState.EATING, { target: ate.used });
-        if (!target) return true;
-      }
-    }
-
-    if (target && ownHealth && ownHealth.currentValue <= Math.max(5, ownHealth.effectiveMax * 0.25)) {
-      const away = {
-        x: this.entity.location.x + (this.entity.location.x - target.location.x) * 3,
-        y: this.entity.location.y,
-        z: this.entity.location.z + (this.entity.location.z - target.location.z) * 3
-      };
-      this.runtime.targetPosition = away;
-      this.engine.execute({ type: "move_to_target" });
-      setBotStatus(this.entity, BotState.FLEEING, { target: target.typeId, distance: distance(this.entity.location, target.location) });
-      return true;
-    }
+    const observed = decision?.threat ? this.resolveEntity(decision.threat.id) : null;
+    const target = isValidEntity(this.runtime.combatTarget)
+      ? this.runtime.combatTarget
+      : (observed || this.findThreat());
+    const health = this.healthSnapshot();
 
     if (!target) {
       if (this.runtime.combatTarget) {
@@ -439,43 +859,62 @@ class BotAgent {
         } catch { /* optional */ }
         if (this.tasks.current?.status === TaskStatus.PAUSED) {
           this.tasks.resume();
-          this.memory.event("Threat cleared; task resumed.");
-          this.notify(`§aResuming task.§r Progress: ${this.progressText()}`);
+          this.runtime.interruption = null;
+          this.memory.event("Threat cleared; task resumed.", "combat");
+          this.reporter.event("threat-cleared", `§a✓ Threat defeated.§r Resuming task at ${this.progressText()}.`);
+          this.requestPlan("threat cleared");
         }
       }
       return false;
     }
 
-    if (!this.runtime.combatTarget && this.tasks.current?.status === TaskStatus.ACTIVE) {
-      this.tasks.pause(`Hostile entity detected: ${target.typeId}.`);
-      this.memory.event(`Task paused for ${target.typeId}.`, "combat");
-      this.notify(`§c⚠ ${target.typeId.replace(/^minecraft:/, "")} detected. Fighting — task paused.`);
+    // AC-22/AC-29: the FIRST time a threat is picked up, the player hears one
+    // line — not one per tick.
+    if (!this.runtime.combatTarget) {
+      this.enterSurvival(`fighting ${String(target.typeId).replace("minecraft:", "")}`);
+      if (this.tasks.current?.status === TaskStatus.PAUSED && !/^Survival:/.test(String(this.tasks.current.interruption?.reason || ""))) {
+        this.tasks.current.interruption = { reason: `Hostile entity detected: ${target.typeId}`, at: Date.now() };
+      }
+      const pausedAt = this.progressText();
+      this.reporter.event("threat", `§c⚠ ${String(target.typeId).replace("minecraft:", "")} detected ${Math.round(distance(this.entity.location, target.location))}m away — fighting${pausedAt ? `, task paused at ${pausedAt}` : ""}.§r`);
     }
     this.runtime.combatTarget = target;
     this.runtime.entityTarget = target;
 
-    const inventory = readInventory(this.entity);
-    if (!/sword|axe/.test(String(inventory.selectedItem?.id || ""))) {
-      const weapon = [
-        "minecraft:netherite_sword", "minecraft:diamond_sword", "minecraft:iron_sword",
-        "minecraft:stone_sword", "minecraft:golden_sword", "minecraft:wooden_sword",
-        "minecraft:netherite_axe", "minecraft:diamond_axe", "minecraft:iron_axe"
-      ].find((id) => countItem(this.entity, id) > 0);
-      if (weapon) equipItem(this.entity, weapon);
+    // AC-16/AC-23: hold the best weapon actually in the inventory.
+    const heldIds = readInventory(this.entity).slots.map((item) => item.id);
+    const held = readInventory(this.entity).selectedItem?.id || "";
+    if (!/sword|axe/.test(String(held))) {
+      const weapon = chooseWeapon(heldIds);
+      if (weapon) {
+        const swap = equipItem(this.entity, weapon);
+        if (swap.success) this.runtime.lastWeapon = weapon;
+      }
     }
 
+    /** @type {any} */
     const result = this.engine.execute({ type: "attack_entity" });
+    this.runtime.lastAction = result;
+    // AC-23 requires the kill to be VERIFIED: the engine only returns success
+    // when the target's health is gone or the entity was removed, so a swing
+    // that connected but did not finish the fight stays `pending` and the bot
+    // keeps fighting instead of claiming a win.
     if (result?.success) {
       this.runtime.combatTarget = null;
       this.runtime.entityTarget = null;
       pickupNearbyItems(this.entity, 4.5);
+      this.memory.event(`Defeated ${target.typeId}; verified by health/entity check.`, "combat");
       if (this.tasks.current?.status === TaskStatus.PAUSED) {
         this.tasks.resume();
+        this.runtime.interruption = null;
         this.memory.event("Combat completed; task resumed.", "combat");
-        this.notify(`§a✓ Threat defeated.§r Resuming task. Progress: ${this.progressText()}`);
+        this.reporter.event("kill", `§a✓ ${String(target.typeId).replace("minecraft:", "")} defeated.§r Resuming task at ${this.progressText()}.`);
+        this.requestPlan("combat finished");
       } else {
-        this.notify("§a✓ Threat defeated.");
+        this.reporter.event("kill", `§a✓ ${String(target.typeId).replace("minecraft:", "")} defeated.§r`);
       }
+    } else if (result && !result.pending && result.reason) {
+      this.reporter.failure(result.reason, this.tasks.current || {});
     }
     return true;
   }
@@ -484,6 +923,20 @@ class BotAgent {
     const plan = this.runtime.plan;
     if (!plan || this.runtime.planIndex >= plan.actions.length) {
       this.runtime.plan = null;
+      return;
+    }
+    // Spotted while searching: drop the lap and go for it. A player who sees the
+    // tree does not finish walking their search circle first, and finishing the
+    // lap is how a bot managed to SEE four oak logs and then report that no oak
+    // log exists (AC-13 — decisions come from what was actually observed).
+    if (plan.search && this.tasks.current?.block && observedCount(this.observation, this.tasks.current.block) > 0) {
+      this.runtime.exploreTarget = null;
+      this.runtime.searchAttempts = 0;
+      this.runtime.plan = null;
+      this.runtime.targetBlock = null;
+      this.memory.event(`Spotted ${String(this.tasks.current.block).replace(/^minecraft:/, "").replace(/_/g, " ")} while searching — going for it.`, "search");
+      this.reporter.event("search", `§aFound it.§r`, 2000);
+      this.requestPlan("spotted the target while searching");
       return;
     }
     const action = plan.actions[this.runtime.planIndex];
@@ -495,15 +948,27 @@ class BotAgent {
       if (this.tasks.current?.remainingActions?.length) this.tasks.current.remainingActions.shift();
       this.runtime.planIndex += 1;
       this.runtime.planFailures = 0;
+      // The target is in sight again: a future miss starts a fresh search.
+      if (action.type === "find_block") this.runtime.searchAttempts = 0;
+      // A verified mine/collect is the moment progress may move (AC-05, AC-17).
+      if (["mine_block", "collect_item", "pickup_item"].includes(action.type)) this.syncTask();
       if (action.type === "return_home" && this.runtime.returningAfterTask) {
         this.runtime.returningAfterTask = false;
         setBotStatus(this.entity, BotState.IDLE);
-        this.notify("§aDone.§r The requested items are in my inventory.");
+        // AC-06: the completed task is announced, the bot stops acting on it and
+        // goes idle instead of starting the same loop again.
+        this.reporter.event("delivered", `§aDone.§r ${this.tasks.current?.goal || "The task"} is finished — the items are in my inventory.`);
+        this.runtime.cameTo = null;
+      }
+      if (action.type === "return_home" && this.runtime.cameTo) {
+        this.runtime.cameTo = null;
+        setBotStatus(this.entity, BotState.IDLE);
+        this.say("Here I am.");
       }
       if (action.type === "return_home" && this.runtime.inventoryFullReturn) {
         this.runtime.inventoryFullReturn = false;
         setBotStatus(this.entity, BotState.WAITING, { target: "inventory storage" });
-        this.notify("§eI am back, but my inventory is still full. Store items, then use !aibot resume.");
+        this.notify(`§eI am back, but my inventory is still full. Store items, then use ${commandHint(this.controller, "resume")}.`);
       }
       if (this.runtime.planIndex >= plan.actions.length) {
         this.runtime.plan = null;
@@ -515,6 +980,12 @@ class BotAgent {
       return;
     }
     if (result.pending) return;
+    // AC-13/AC-32: "I cannot see one from here" is a SEARCH problem, not a plan
+    // failure. Re-planning the identical plan — which the code below does — just
+    // asked the same question in the same place and got the same answer, eight
+    // times, then failed the task while a tree stood 30 blocks away.
+    if (action.type === "find_block" && this.tasks.current?.status === TaskStatus.ACTIVE
+      && this.searchForTarget(action.block || this.tasks.current.block)) return;
     if (result.reason === "Inventory is full.") {
       this.tasks.pause("Inventory full; returning to owner for storage.");
       this.memory.event("Task paused because inventory is full.", "recovery");
@@ -522,30 +993,319 @@ class BotAgent {
       this.runtime.targetBlock = null;
       this.runtime.plan = { goal: "Return to owner for inventory storage", thought: "Inventory is full; do not claim collection progress.", actions: [{ type: "return_home" }] };
       this.runtime.planIndex = 0;
-      this.notify("§eInventory full.§r Returning to you; task is paused until items are stored.");
+      this.reporter.event("inventory-full", "§eInventory full.§r Returning to you; the task is paused until items are stored.");
       return;
     }
     this.runtime.planFailures += 1;
+    this.runtime.noProgressCycles += 1;
     this.runtime.targetBlock = null;
     this.runtime.plan = null;
     // Every failed action used to be swallowed here; the reason is exactly what
-    // a player needs ("no walkable path", "no tool", "block is not mineable").
+    // a player needs (AC-32: "no walkable path", "no tool", "not mineable").
     this.test.note("action failed", `${result.action || "action"}: ${result.reason || "no reason given"}`, {
       level: "warn",
       context: `${this.name} · plan step ${(this.runtime.planIndex || 0) + 1} · failure ${this.runtime.planFailures + 1}/4`
     });
+    this.reporter.failure(result.reason, this.tasks.current || {});
+    // AC-40: reality wins. A "mine diamond_ore" plan with no diamond ore in the
+    // observation is recorded as a fact, so the bot does not keep pretending.
+    if (/was found within the observation radius|No .* was found nearby/.test(String(result.reason || ""))) {
+      this.memory.fact(explainFailure(result.reason, this.tasks.current || {}));
+    }
     setBotStatus(this.entity, BotState.ERROR, { target: result.reason || "action failed" });
+    // AC-09: never loop forever. Steps can keep "succeeding" (find → walk →
+    // find → walk) while the task makes no progress at all — a missing tool is
+    // the classic case — so the bound is on cycles without progress, not only on
+    // consecutive failures.
+    if (this.runtime.noProgressCycles >= MAX_PROGRESSLESS_CYCLES) {
+      const reason = result.reason || "Action failed repeatedly.";
+      this.tasks.fail(reason);
+      this.memory.event(`Task failed: ${MAX_PROGRESSLESS_CYCLES} attempts produced no progress (${reason}).`, "error");
+      this.memory.archiveTask(this.tasks.current);
+      this.runtime.noProgressCycles = 0;
+      this.runtime.searchAttempts = 0;
+      this.notify(`§cI could not make progress on that.§r ${explainFailure(reason, this.tasks.current || {})}`);
+      setBotStatus(this.entity, BotState.ERROR, { target: reason });
+      this.runtime.stuck.reset();
+      this.persist(true);
+      return;
+    }
     if (this.runtime.planFailures >= 4) {
       this.tasks.fail(result.reason || "Action failed repeatedly.");
       this.memory.event(`Task failed: ${result.reason}`, "error");
-      this.notify(`§cTask failed.§r ${result.reason}`);
+      this.memory.archiveTask(this.tasks.current);
+      this.notify(`§cTask failed.§r ${explainFailure(result.reason, this.tasks.current || {})}`);
       setBotStatus(this.entity, BotState.ERROR, { target: result.reason });
+      this.runtime.stuck.reset();
       this.persist(true);
     } else {
       this.requestPlan(result.reason || "action failed");
     }
   }
 
+  /**
+   * AC-13 / AC-32 — "I cannot see one from here" is not the end of a task.
+   *
+   * A player who cannot see the thing they were asked for does three things, in
+   * this order: recalls where they last saw one, walks to whatever implies it is
+   * nearby (a canopy means a trunk under it), and otherwise heads somewhere new
+   * and looks again. This is that ladder, and it is bounded — after
+   * MAX_SEARCH_ATTEMPTS the task fails with a sentence that says what was
+   * searched, because an endless silent search is worse than an honest stop.
+   *
+   * @param {string} wanted the block id the task needs
+   * @returns {boolean} true when a search plan was set (caller must not count a plan failure)
+   */
+  searchForTarget(wanted) {
+    const block = String(wanted || "");
+    if (!block) return false;
+    const label = block.replace(/^minecraft:/, "").replace(/_/g, " ");
+    if (this.runtime.searchBlock !== block) {
+      this.runtime.searchBlock = block;
+      this.runtime.searchAttempts = 0;
+      this.runtime.searchOrigin = { x: this.entity.location.x, y: this.entity.location.y, z: this.entity.location.z };
+    }
+    const attempt = (this.runtime.searchAttempts += 1);
+    const origin = this.runtime.searchOrigin || this.entity.location;
+
+    if (attempt > MAX_SEARCH_ATTEMPTS) {
+      const reached = 8 + MAX_SEARCH_ATTEMPTS * 3;
+      this.runtime.searchAttempts = 0;
+      this.runtime.searchBlock = "";
+      const reason = `No ${block} was found within the observation radius after ${MAX_SEARCH_ATTEMPTS} searches`;
+      this.tasks.fail(reason);
+      this.memory.event(`Gave up looking for ${label}: ${MAX_SEARCH_ATTEMPTS} searches found nothing.`, "error");
+      this.memory.fact(`No ${label} within about ${reached} blocks of ${Math.floor(origin.x)}, ${Math.floor(origin.z)} — searched and found none.`);
+      this.memory.archiveTask(this.tasks.current);
+      this.notify(`§cNo ${label} anywhere near here.§r I searched ${MAX_SEARCH_ATTEMPTS} spots, out to about ${reached} blocks from ${Math.floor(origin.x)}, ${Math.floor(origin.z)}.\n§7Bring me closer to one (${commandHint(this.controller, "come")}), or ask for something that exists here.`);
+      setBotStatus(this.entity, BotState.ERROR, { target: `no ${label} found` });
+      this.runtime.stuck.reset();
+      this.persist(true);
+      return true;
+    }
+
+    const plan = (goal, thought, actions) => {
+      // `search: true` lets executePlan abort the lap the moment a fresh
+      // observation actually contains the target.
+      this.runtime.plan = { goal, thought, actions, search: true };
+      this.runtime.planIndex = 0;
+      this.runtime.planFailures = 0;
+      this.runtime.replans += 1;
+      this.runtime.needsObservation = true;
+      setBotStatus(this.entity, BotState.SEARCHING, { target: label, attempt });
+    };
+
+    // 1. Remembered sighting — the cheapest and most reliable lead.
+    const known = this.memory.knownResource(block);
+    if (known && Array.isArray(known.position)) {
+      // Consume the memory: if it is wrong, revisiting it forever is exactly the
+      // loop this ladder exists to prevent. A later scan re-adds it if real.
+      this.memory.forgetResource(block);
+      this.runtime.targetBlock = null;
+      this.runtime.targetPosition = { x: known.position[0], y: known.position[1], z: known.position[2] };
+      this.memory.event(`Searching for ${label}: I remember seeing one at ${known.position.join(", ")}.`, "search");
+      plan(`Find ${label} where I last saw one`, "Memory says one was here; verify before believing it.", [
+        { type: "move_to_target" },
+        { type: "find_block", block }
+      ]);
+      return true;
+    }
+
+    // 2. A visible hint: leaves overhead mean a trunk is under them.
+    const hintIds = HINT_FOR_BLOCK[block] || [];
+    const hint = hintIds.length ? (this.observation?.hints || []).find((entry) => hintIds.includes(entry.id)) : null;
+    if (hint && Array.isArray(hint.position)) {
+      this.runtime.targetBlock = null;
+      this.runtime.targetPosition = { x: hint.position[0], y: hint.position[1], z: hint.position[2] };
+      this.memory.event(`Searching for ${label}: ${String(hint.id).replace("minecraft:", "").replace(/_/g, " ")} ${hint.distance}m away suggests one is under it.`, "search");
+      plan(`Investigate the ${label.replace(/ log$/, "")} canopy`, "Leaves mean a trunk below; walk under them and look again.", [
+        { type: "move_to_target" },
+        { type: "find_block", block }
+      ]);
+      if (attempt === 1) this.reporter.event("search", `§eNo ${label} in sight — I can see ${String(hint.id).replace("minecraft:", "").replace(/_/g, " ")} ${hint.distance}m away, checking there.§r`, 3000);
+      return true;
+    }
+
+    // 3. Nothing to go on: walk outward in a widening golden-angle spiral so no
+    //    two attempts check the same ground.
+    const angle = attempt * SEARCH_TURN;
+    const radius = 8 + attempt * 3;
+    this.runtime.exploreTarget = {
+      x: Math.floor(origin.x + Math.cos(angle) * radius),
+      y: Math.floor(origin.y),
+      z: Math.floor(origin.z + Math.sin(angle) * radius)
+    };
+    this.runtime.targetBlock = null;
+    this.runtime.targetPosition = null;
+    this.memory.event(`Searching for ${label}: walking ${radius}m out (attempt ${attempt}/${MAX_SEARCH_ATTEMPTS}).`, "search");
+    this.test.note("search", `no ${label} visible; searching ${radius}m out (attempt ${attempt}/${MAX_SEARCH_ATTEMPTS})`, { level: "info", context: this.name });
+    if (attempt === 1) this.reporter.event("search", `§eNo ${label} in sight — searching nearby.§r`, 3000);
+    else if (attempt === 4 || attempt === MAX_SEARCH_ATTEMPTS) {
+      this.reporter.event("search", `§eStill no ${label}. I have checked ${attempt} spots out to ${radius} blocks; ${MAX_SEARCH_ATTEMPTS - attempt} to go before I stop.§r`, 3000);
+    }
+    plan(`Search for ${label}`, "No sighting and no hint: cover new ground and scan again.", [
+      { type: "explore" },
+      { type: "find_block", block }
+    ]);
+    return true;
+  }
+
+  /**
+   * AC-09 / AC-10 — obstacle and stuck recovery, with a finite ladder:
+   *   1st stall → drop the route and re-plan (another route),
+   *   2nd stall → try a sideways detour around the obstacle,
+   *   3rd+      → abandon the movement safely and explain (never loop forever).
+   */
+  checkStuck() {
+    const target = this.runtime.targetBlock || this.runtime.targetPosition;
+    const stuck = this.runtime.stuck.update(this.entity.location, target);
+    if (!stuck.stuck) return false;
+    setBotStatus(this.entity, stuck.attempts > 1 ? BotState.RECOVERING : BotState.STUCK, { target: "recalculating route" });
+
+    if (stuck.attempts === 1) {
+      clearRoute(this.entity.id);
+      this.runtime.plan = null;
+      this.runtime.targetBlock = null;
+      this.runtime.replans += 1;
+      this.memory.event("Movement stalled — recalculating route.", "recovery");
+      this.test.note("stuck", "no progress for 4s; recalculating route", { level: "warn", context: this.name });
+      this.requestPlan("route blocked; recalculating");
+      return true;
+    }
+    if (stuck.attempts === 2) {
+      const detour = this.detourPoint(target);
+      if (detour) {
+        this.runtime.exploreTarget = detour;
+        this.runtime.plan = { goal: "Detour around an obstacle", thought: "The direct route failed twice; try from another side.", actions: [{ type: "explore" }] };
+        this.runtime.planIndex = 0;
+        this.runtime.replans += 1;
+        this.memory.event("Direct route blocked twice — trying a detour.", "recovery");
+        this.reporter.event("detour", "§eSomething is in my way — trying another route.§r");
+        return true;
+      }
+    }
+    if (stuck.attempts > 3) {
+      this.runtime.plan = null;
+      this.runtime.targetBlock = null;
+      this.tasks.fail("Target unreachable after path recovery attempts.");
+      this.memory.event("Abandoned the movement: target unreachable after detours.", "error");
+      this.memory.archiveTask(this.tasks.current);
+      this.notify("§cThe target area is unreachable.§r I stopped trying instead of looping — clear a path or give me a closer target.");
+      setBotStatus(this.entity, BotState.ERROR, { target: "unreachable" });
+      this.runtime.stuck.reset();
+      this.persist(true);
+    }
+    return true;
+  }
+
+  /** A point off to the side of the blocked target, used as a detour goal. */
+  /**
+   * AC-08 / AC-09 — the follow half of stuck recovery.
+   *
+   * First stall: drop the cached route and try again (the player may have moved
+   * and opened a line). Second and third: step sideways off the direct line, so
+   * a wall is walked around instead of stood in front of. After that: say so
+   * plainly. Following is a standing order, so the bot does not give up on it —
+   * but it stops pretending and tells the player what is wrong (AC-32).
+   */
+  checkFollowStuck() {
+    const owner = this.owner();
+    if (!owner) return false;
+    const stuck = this.runtime.stuck.update(this.entity.location, owner.location);
+    if (!stuck.stuck) return false;
+
+    if (stuck.attempts <= 1) {
+      clearRoute(this.entity.id);
+      this.runtime.followDetour = null;
+      this.memory.event("Following stalled — recalculating the route.", "recovery");
+      this.test.note("follow stuck", `no progress for 4s, ${Math.round(stuck.distance ?? 0)}m from the owner`, { level: "warn", context: this.name });
+      return true;
+    }
+    if (stuck.attempts <= 3) {
+      const detour = this.detourPoint(owner.location);
+      if (detour) {
+        this.runtime.followDetour = detour;
+        clearRoute(this.entity.id);
+        this.memory.event(`Something is in the way while following — stepping ${stuck.attempts % 2 === 0 ? "right" : "left"}.`, "recovery");
+        this.reporter.event("follow-blocked", "§eSomething is in my way — stepping around it.§r", 8000);
+        return true;
+      }
+    }
+    stopEntity(this.entity);
+    this.runtime.followDetour = null;
+    this.reporter.event("follow-blocked", `§cI can't reach you — something is in the way (§7${Math.round(distance(this.entity.location, owner.location))}m apart§c). Come closer or clear a path and I'll follow again.§r`, 20000);
+    this.test.note("follow blocked", `gave up stepping aside; ${Math.round(distance(this.entity.location, owner.location))}m from the owner`, { level: "warn", context: this.name });
+    return true;
+  }
+
+  /**
+   * AC-09 — following when the pathfinder finds no route at all.
+   *
+   * `moving: false` from the engine means "I could not find a way to you this
+   * tick". One such tick is noise (the player stepped behind a hill); hundreds
+   * in a row is a wall. Before this ladder existed the bot did nothing in that
+   * case — it stood at the obstacle and stayed quiet, which to a player is
+   * indistinguishable from a broken mod. Escalate instead: drop the cached
+   * route, step sideways looking for a way round (alternating sides), and if
+   * none turns up, say so plainly and stop burning the tick budget on a path
+   * that does not exist. Following is a standing order, so it keeps listening
+   * for the gap to open — it does not cancel itself.
+   */
+  checkFollowBlocked(step) {
+    const owner = this.owner();
+    if (!owner) { this.runtime.followBlocked = 0; return false; }
+    this.runtime.followBlocked = (this.runtime.followBlocked || 0) + 1;
+    const blocked = this.runtime.followBlocked;
+    const gap = Math.round(distance(this.entity.location, owner.location));
+
+    if (blocked === 1) {
+      this.memory.event(`No route while following (${step.reason || "no reason given"}).`, "recovery");
+      this.test.note("follow blocked", `${step.reason || "no route"} · ${gap}m from the owner`, { level: "warn", context: this.name });
+    }
+    if (blocked === 20) { clearRoute(this.entity.id); return true; }
+
+    // Sidesteps: 2 s, 6 s, 10 s, 14 s of refusing, alternating left and right.
+    const sideStep = FOLLOW_SIDESTEPS.indexOf(blocked);
+    if (sideStep >= 0) {
+      clearRoute(this.entity.id);
+      this.runtime.followDetour = this.detourPoint(owner.location, sideStep + 1);
+      this.reporter.event("follow-blocked", `§eI can't reach you in a straight line — trying around it (§7${gap}m§e).§r`, 6000);
+      return true;
+    }
+    if (blocked === FOLLOW_GIVE_UP_TICKS) {
+      stopEntity(this.entity);
+      this.runtime.followDetour = null;
+      this.reporter.event("follow-blocked", `§cI can't reach you — something is in the way and I've run out of ways around it (§7${gap}m apart§c). Come closer or clear a path and I'll follow again.§r`, 20000);
+      this.test.note("follow gave up", `no route for ${FOLLOW_GIVE_UP_TICKS} ticks; ${gap}m from the owner`, { level: "warn", context: this.name });
+      return true;
+    }
+    if (blocked > FOLLOW_GIVE_UP_TICKS && blocked % 100 === 0) {
+      // Still ordered to follow: keep testing for an opening, cheaply.
+      clearRoute(this.entity.id);
+      this.runtime.followDetour = this.detourPoint(owner.location, Math.floor(blocked / 100));
+    }
+    return true;
+  }
+
+  detourPoint(target, attempt = this.runtime.stuck.attempts) {
+    if (!target) return null;
+    const here = this.entity.location;
+    const dx = target.x - here.x;
+    const dz = target.z - here.z;
+    const length = Math.hypot(dx, dz) || 1;
+    // Perpendicular, 5 blocks out, alternated by attempt count.
+    const sign = attempt % 2 === 0 ? 1 : -1;
+    return {
+      x: here.x + (dx / length) * 3 + (-dz / length) * 5 * sign,
+      y: here.y,
+      z: here.z + (dz / length) * 3 + (dx / length) * 5 * sign
+    };
+  }
+
+  /**
+   * One AI cycle: observe → decide by priority → act → verify → report.
+   * Returns false when the entity is gone (the controller then unregisters it).
+   */
   tick(tick) {
     if (!isValidEntity(this.entity)) {
       clearRoute(this.entity?.id);
@@ -558,33 +1318,43 @@ class BotAgent {
       try { pickupNearbyItems(this.entity, 1.8); } catch { /* ignore */ }
     }
 
-    if (tick % Math.max(10, this.config.observationIntervalTicks) === 0 || !this.observation) {
-      this.observation = makeObservation(this.entity, this.tasks.current, this.memory, this.config);
-      this.memory.observe(this.observation);
-      if (this.tasks.current?.status === TaskStatus.ACTIVE) {
-        this.tasks.syncCount(countItem(this.entity, this.currentCollectionItem()));
-        if (this.tasks.current?.status === TaskStatus.COMPLETED && !this.runtime.returningAfterTask) {
-          this.memory.archiveTask(this.tasks.current);
-          this.runtime.returningAfterTask = true;
-          this.runtime.plan = { goal: "Return to player", thought: "Collection target verified in inventory.", actions: [{ type: "return_home" }] };
-          this.runtime.planIndex = 0;
-          this.notify(`§a✓ ${this.tasks.current.target}/${this.tasks.current.target} collected.§r Returning to you.`);
-          this.memory.event("Collection completed and inventory count verified.");
-        }
-      }
+    // OBSERVE — on the configured interval only, never every tick (AC-41).
+    this.observe(tick);
+    // VERIFY — progress comes from the real inventory count (AC-17/AC-26).
+    this.syncTask();
+
+    const health = this.healthSnapshot();
+    const hasFood = this.hasFood();
+    const threats = this.threatList();
+    const decision = assess({
+      health,
+      threats,
+      task: this.tasks.current,
+      follow: this.runtime.follow,
+      hasFood,
+      passive: this.config.combatMode === "passive",
+      ownerOnline: Boolean(this.owner())
+    });
+    this.runtime.priority = decision;
+
+    // AC-21 first: a hurt, foodless bot says so once instead of looping.
+    this.reportMissingFood(health, hasFood);
+
+    // 1. SURVIVAL (AC-20, AC-25) — outranks combat and every task.
+    if (decision.behavior === Behavior.FLEE || decision.behavior === Behavior.EAT) {
+      if (this.handleSurvival(decision)) { this.persist(); return true; }
     }
-
-    // Auto-eat outside combat when damaged.
-    if (tick % 40 === 0) {
-      try {
-        const health = this.entity.getComponent("minecraft:health");
-        if (health && health.currentValue < health.effectiveMax * 0.7) tryEatBestFood(this.entity);
-      } catch { /* optional */ }
+    // 2. COMBAT (AC-22..AC-24, AC-29).
+    if (decision.behavior === Behavior.COMBAT) {
+      if (this.handleCombat(decision)) { this.persist(); return true; }
     }
+    // 3. Danger over → resume exactly what was interrupted (AC-28, AC-29).
+    this.exitSurvival();
+    if (!threats.length && this.runtime.combatTarget) this.handleCombat(decision);
 
-    if (this.handleCombat()) { this.persist(); return true; }
-
-    if (this.runtime.follow && (!this.tasks.current || this.tasks.current.status !== TaskStatus.ACTIVE)) {
+    // 4. Ordinary work, in priority order.
+    const task = this.tasks.current;
+    if (decision.behavior === Behavior.FOLLOW && (!task || task.status !== TaskStatus.ACTIVE)) {
       /** @type {any} */
       let step = null;
       try {
@@ -602,43 +1372,165 @@ class BotAgent {
         this.test.note("follow", `follow_player → ${this.runtime.lastFollowResult} (${Math.round(step.distance ?? -1)}m away)`, { level: "warn", context: this.name });
       } else if (step) this.runtime.lastFollowResult = step.arrived ? "arrived" : "walking";
       else this.runtime.lastFollowResult = "engine threw (see the error log)";
-    } else if (!this.runtime.plan && !this.runtime.follow) {
-      // Idle — release the movement keys so the bot eases to a player-like stop.
-      if (tick % 10 === 0) stopEntity(this.entity);
-    }
-
-    if (this.runtime.returningAfterTask && !this.runtime.plan) {
+      // AC-08/AC-09: following has no plan, so the plan-failure ladder never saw
+      // it — a bot that walked into a wall just stood there forever, silently,
+      // while the player waited. Three outcomes are distinct: walking (watch for
+      // a stall), refused (no route at all — escalate), arrived (all clear).
+      if (step?.moving) {
+        // Progress toward the player clears the blocked ladder; progress toward a
+        // detour does not, or the bot would sidestep forever and never report.
+        if (!this.runtime.followDetour) this.runtime.followBlocked = 0;
+        this.checkFollowStuck();
+      } else if (step && !step.arrived) {
+        this.checkFollowBlocked(step);
+      } else {
+        this.runtime.followBlocked = 0;
+        this.runtime.stuck.reset();
+      }
+      // AC-08: following must not permanently silence a task the player set.
+      if (step?.arrived && task?.status === TaskStatus.PAUSED && this.runtime.interruption === "follow order") {
+        // Keep following — the player asked for it — but say the task is waiting.
+        this.reporter.event("task-waiting", `§7I'm with you. Your task is paused at ${this.progressText()}; say "resume" when you want me back on it.§r`, 30000);
+      }
+    } else if (this.runtime.returningAfterTask && !this.runtime.plan) {
       this.runtime.plan = { goal: "Return to player", thought: "Returning after verified task.", actions: [{ type: "return_home" }] };
       this.runtime.planIndex = 0;
     }
-    if (this.tasks.current?.status === TaskStatus.ACTIVE && !this.runtime.plan && !this.runtime.planning) {
+
+    if (task?.status === TaskStatus.ACTIVE && !this.runtime.plan && !this.runtime.planning) {
       this.requestPlan("task needs an action");
     }
     if (this.runtime.plan) {
       this.executePlan();
-      const target = this.runtime.targetBlock || this.runtime.targetPosition;
-      const stuck = this.runtime.stuck.update(this.entity.location, target);
-      if (stuck.stuck) setBotStatus(this.entity, stuck.attempts > 1 ? BotState.RECOVERING : BotState.STUCK, { target: "recalculating route" });
-      if (stuck.stuck && stuck.attempts > 3) {
-        this.runtime.plan = null;
-        this.runtime.targetBlock = null;
-        this.tasks.fail("Target unreachable after path recovery attempts.");
-        this.notify("§cTarget unreachable.§r Task failed after safe recovery attempts.");
-        setBotStatus(this.entity, BotState.ERROR, { target: "unreachable" });
-      }
+      // AC-09/AC-10 watch TRAVEL only. A bot standing still while it breaks a
+      // block or waits for the drop to appear is working, not stalled — running
+      // the stuck ladder on every action used to send it on a pointless detour
+      // in the middle of a mine.
+      if (this.runtime.lastAction?.moving) this.checkStuck();
+      else this.runtime.stuck.reset();
+    } else if (decision.behavior === Behavior.IDLE && tick % 10 === 0) {
+      // Idle — release the movement keys so the bot eases to a player-like stop.
+      stopEntity(this.entity);
+      const state = readBotStatus(this.entity);
+      if (state.state !== BotState.IDLE && !(task && task.status === TaskStatus.COMPLETED)) setBotStatus(this.entity, BotState.IDLE);
     }
+
     if (this.config.debug && tick % 100 === 0) this.notify(`\n${this.debugText()}`);
     this.persist();
     return true;
   }
 
+  /**
+   * Read the world once per observation interval and fold the cost into this
+   * bot's counters. Kept separate from tick() so the acceptance runner (and the
+   * tests) can force a fresh observation without waiting for the interval.
+   */
+  observe(tick, force = false) {
+    // The interval is configured in GAME TICKS (20 = one second), but this loop
+    // is driven by main.js every 5 ticks, so `tick` here counts RUNS. Counting
+    // runs against a tick interval made the real period five times longer than
+    // configured: the bot re-read the world every 100 ticks — five seconds. It
+    // kept walking and mining from that stale picture, which is fine for a log,
+    // and fatal for a creeper: perception has to be at least as fast as the
+    // danger it is perceiving. Measure elapsed time instead, so the cadence is
+    // what the config says whatever interval the loop is driven at.
+    const intervalTicks = Math.max(10, Number(this.config.observationIntervalTicks) || 20);
+    const intervalMs = intervalTicks * 50;
+    const sinceScan = Date.now() - (this.observation?.timestamp || 0);
+    // A stale snapshot costs one extra scan, not a scan per tick: `find_block`
+    // sets needsObservation when everything it could see is already gone, and
+    // the re-scan is allowed at most twice a second (AC-41).
+    const stale = this.runtime.needsObservation === true && sinceScan > 500;
+    if (!force && !stale && this.observation && sinceScan < intervalMs) return this.observation;
+    this.runtime.needsObservation = false;
+    const owner = this.owner();
+    const observation = makeObservation(
+      this.entity, this.tasks.current, this.memory, this.config,
+      owner ? { id: owner.id, name: owner.name } : { id: this.ownerId, name: this.ownerName }
+    );
+    this.observation = observation;
+    this.runtime.scans += 1;
+    this.runtime.scannedCells += observation.scan?.cellsRead || 0;
+    this.runtime.scannedEntities += observation.scan?.entitiesRead || 0;
+    this.runtime.scanMs += observation.scan?.ms || 0;
+    this.memory.observe(observation);
+    return observation;
+  }
+
+  /**
+   * Re-read progress from the REAL inventory (AC-17: a failed mine never moves
+   * the number; AC-26: the number survives every cycle) and announce milestones
+   * without flooding chat (AC-31).
+   */
+  syncTask() {
+    const task = this.tasks.current;
+    if (!task || task.status !== TaskStatus.ACTIVE) return task;
+    const before = task.progress;
+    this.tasks.syncCount(countItem(this.entity, this.currentCollectionItem()));
+    const after = this.tasks.current;
+    if (!after) return null;
+    if (after.progress > before) {
+      // Real progress: the "no progress" bound starts over (AC-05/AC-09).
+      this.runtime.noProgressCycles = 0;
+      this.runtime.searchAttempts = 0;
+      this.memory.event(`Progress verified: ${after.progress}/${after.target} ${this.currentCollectionItem()} in inventory.`);
+      this.reporter.progress({ progress: after.progress, target: after.target, block: this.currentCollectionItem() });
+      this.persist(true);
+    }
+    if (after.status === TaskStatus.COMPLETED && !this.runtime.returningAfterTask) this.onTaskCompleted(after);
+    return after;
+  }
+
+  /** AC-06: mark complete, stop the work, report it, then go idle. */
+  onTaskCompleted(task) {
+    this.runtime.plan = null;
+    this.runtime.planIndex = 0;
+    this.runtime.targetBlock = null;
+    this.runtime.planFailures = 0;
+    this.runtime.stuck.reset();
+    stopEntity(this.entity);
+    this.memory.archiveTask(task);
+    this.memory.fact(`Completed "${task.goal}" (${task.progress}/${task.target}).`);
+    this.memory.event(`Task completed and verified: ${task.goal} ${task.progress}/${task.target}.`, "task");
+    this.reporter.progress({ progress: task.progress, target: task.target, block: this.currentCollectionItem(), force: true });
+    this.reporter.event("complete", `§a✓ ${task.progress}/${task.target} — ${task.goal} complete.§r Bringing it back to you.`);
+    // Hand the goods back, then idle: the completed action is never repeated.
+    this.runtime.returningAfterTask = true;
+    this.runtime.plan = { goal: "Return to player", thought: "Collection target verified in inventory.", actions: [{ type: "return_home" }] };
+    this.runtime.planIndex = 0;
+    setBotStatus(this.entity, BotState.RETURNING, { target: this.ownerName || "owner", progress: `${task.progress}/${task.target}` });
+    this.persist(true);
+  }
+
+  /**
+   * AC-34: current task, progress, target, health and basic state — read from
+   * the live entity and the live task object, never from a cached string, so
+   * the answer cannot drift from what the bot is actually doing.
+   */
   statusText() {
     const task = this.tasks.current;
     const status = readBotStatus(this.entity);
-    const health = this.entity.getComponent("minecraft:health");
+    const health = this.healthSnapshot();
     const inventory = readInventory(this.entity);
     const follow = this.runtime.follow ? `Follow: ${this.runtime.lastFollowResult || "walking"}` : "Follow: off";
-    return `${this.name}\nStatus: ${status.state}${status.block ? ` ${status.block}` : ""}\nTask: ${task?.goal || "None"}\nProgress: ${task ? `${task.progress}/${task.target}` : "-"}\nHealth: ${health ? `${Math.ceil(health.currentValue)}/${Math.ceil(health.effectiveMax ?? health.defaultValue ?? 20)}` : "unknown"}\nInventory: ${inventory.slots.length}/${inventory.size}\n${follow}\nAI: ${this.config.provider === "fallback" ? "fallback" : (this.runtime.aiErrorShown ? "unavailable / fallback" : this.config.provider)}`;
+    const decision = this.runtime.priority;
+    const item = task ? this.currentCollectionItem() : "";
+    const lines = [
+      `§b${this.name}§r`,
+      `State: ${status.state}${status.block ? ` ${String(status.block).replace(/^minecraft:/, "")}` : ""}${status.target ? ` → ${String(status.target).slice(0, 40)}` : ""}`,
+      `Task: ${task?.goal || "None"}`,
+      task?.block ? `Target: ${task.block} (collecting ${item})` : "Target: -",
+      `Progress: ${task ? `${task.progress}/${task.target}${task.remaining ? ` · ${task.remaining} to go` : ""}` : "-"}`,
+      task?.status ? `Task status: ${task.status}${task.interruption ? ` (${task.interruption.reason})` : ""}` : null,
+      `Priority: ${decision.name} → ${decision.behavior} (${decision.reason})`,
+      `Health: ${Math.ceil(health.current)}/${Math.ceil(health.max)}`,
+      `Inventory: ${inventory.slots.length}/${inventory.size} used · ${inventory.freeSlots} free${inventory.selectedItem ? ` · holding ${String(inventory.selectedItem.id).replace(/^minecraft:/, "").replace(/_/g, " ")}` : ""}`,
+      follow,
+      `Position: ${Math.round(this.entity.location.x)}, ${Math.round(this.entity.location.y)}, ${Math.round(this.entity.location.z)}`,
+      `Threats seen: ${this.observation?.threats?.length ?? 0}${this.runtime.lastCombatNote ? ` · ${this.runtime.lastCombatNote}` : ""}`,
+      `AI: ${this.config.provider === "fallback" ? "fallback (deterministic)" : (this.runtime.aiErrorShown ? "unavailable / fallback" : this.config.provider)}`
+    ].filter(Boolean);
+    return lines.join("\n");
   }
 
   debugText() {
@@ -651,9 +1543,14 @@ class BotAgent {
       `STATE: ${status.state}`, `CURRENT TASK: ${task?.id || "-"}`, `TARGET: ${target ? JSON.stringify(target) : "-"}`,
       `TARGET DISTANCE: ${distanceToTarget}`, `CURRENT ACTION: ${this.runtime.lastAction?.action || "-"}`,
       `TASK PROGRESS: ${task ? `${task.progress}/${task.target}` : "-"}`, `PATH STATUS: ${this.runtime.stuck.attempts > 0 ? `recovery ${this.runtime.stuck.attempts}` : "clear"}`,
+      `PRIORITY: ${this.runtime.priority.name} → ${this.runtime.priority.behavior} (${this.runtime.priority.reason})`,
+      `SURVIVAL: ${this.runtime.survivalSince ? `${this.runtime.survivalReason} for ${Math.round((Date.now() - this.runtime.survivalSince) / 1000)}s` : "not active"}`,
+      `OBSERVED: ${this.observation ? `${this.observation.blocks.length} blocks, ${this.observation.nearbyEntities.length} entities, ${this.observation.threats.length} threats` : "nothing yet"}`,
       `AI: ${this.runtime.aiErrorShown ? "UNAVAILABLE / FALLBACK" : this.config.provider}`, `LAST PLAN: ${this.runtime.lastPlanReason}`,
       `AI REQUEST: ${this.runtime.lastAIRequest}`, `AI RESPONSE: ${this.runtime.lastAIResponse}`,
       `ACTION VALIDATION: ${this.runtime.lastValidation}`, `INVENTORY: ${readInventory(this.entity).slots.length}/${readInventory(this.entity).size}`,
+      `TOOL: ${this.runtime.lastToolUsed || "-"}${this.runtime.lastToolIssue ? ` (issue: ${this.runtime.lastToolIssue})` : ""}`,
+      `COST: ${this.runtime.scans} scans / ${this.runtime.scannedCells} block reads / ${this.runtime.scannedEntities} entity reads / ${this.runtime.scanMs}ms · ${this.runtime.chatLines} chat lines · ${this.runtime.replans} replans`,
       `FOLLOW VERDICT: ${this.runtime.lastFollowResult || "-"}`,
       `MOVEMENT LOOP: ${this.controller?.test?.liveness?.movementStalled ? "STALLED (bots cannot walk)" : "running"}`,
       `MEMORY EVENTS: ${this.memory.snapshot().shortTerm.length}`,
@@ -661,10 +1558,31 @@ class BotAgent {
     ].join("\n");
   }
 
+  /**
+   * AC-18 / AC-37: an accurate inventory summary. Counts are read from the live
+   * container at call time and aggregated by item id (`oak_log x12`), so the
+   * number in chat is the number in the inventory — including the item that is
+   * currently held, which lives in the equipment slot rather than the container.
+   */
   inventoryText() {
     const inventory = readInventory(this.entity);
-    const lines = inventory.slots.map((item) => `Slot ${item.slot + 1}: ${item.name} ×${item.count}`);
-    return `§b${this.name} inventory§r\n${lines.join("\n") || "(empty)"}\nFree slots: ${inventory.freeSlots}`;
+    /** @type {Map<string, number>} */
+    const totals = new Map();
+    for (const item of inventory.slots) totals.set(item.id, (totals.get(item.id) || 0) + item.count);
+    const held = inventory.selectedItem;
+    if (held?.id) totals.set(held.id, (totals.get(held.id) || 0) + (held.count || 1));
+    // AC-18/AC-37: the summary is read by a player, so it uses the same names
+    // the game shows ("Oak Log ×5"), not raw ids ("oak_log x5").
+    const summary = [...totals.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([id, count]) => `${itemName(id)} ×${count}`);
+    const slots = inventory.slots.map((item) => `  §8slot ${item.slot + 1}: §7${item.name} ×${item.count}`);
+    return [
+      `§b${this.name} inventory§r`,
+      summary.length ? summary.join("\n") : "(empty)",
+      `§8Slots used: ${inventory.slots.length}/${inventory.size} · free: ${inventory.freeSlots} · items: ${inventory.totalItems}${held ? ` · holding: ${held.name}` : ""}§r`,
+      ...(slots.length ? [`§8Detail:`, ...slots.slice(0, 12)] : [])
+    ].join("\n");
   }
 
   updateConfig(next) { this.config = saveConfig(this.entity, { ...this.config, ...next }); this.persist(true); }
@@ -729,7 +1647,9 @@ export class BotController {
   lookupForPlayer(player, name = "") {
     const named = name ? this.byName(name) : null;
     if (named && canUseBot(player, named, named.config)) { this.healOwnerBinding(named, player); return named; }
-    const agent = this.all().find((agent) => (!agent.ownerId || agent.ownerId === player.id || agent.ownerName === player.name) && canUseBot(player, agent, agent.config)) || null;
+    // A positive match only: id OR recorded owner name. `!agent.ownerId` used to
+    // count as a match, which handed an ownerless bot to whoever asked first.
+    const agent = this.all().find((agent) => (agent.ownerId === player.id || (Boolean(agent.ownerName) && agent.ownerName === player.name)) && canUseBot(player, agent, agent.config)) || null;
     if (agent) this.healOwnerBinding(agent, player);
     return agent;
   }
@@ -989,6 +1909,68 @@ export class BotController {
   names() { return this.all().map((agent) => agent.name); }
   status(player, name) { const agent = this.forPlayer(player, name); return agent?.statusText() || noBotMessage(this); }
   inventory(player, name) { const agent = this.forPlayer(player, name); return agent?.inventoryText() || noBotMessage(this); }
+  /** AC-04/AC-34: the objective card for the player's bot. */
+  task(player, name = "") { const agent = this.forPlayer(player, name); return agent?.taskText() || noBotMessage(this); }
+
+  /**
+   * AC-14 `/bot mine stone [count]`. Returns a chat line; the work itself is
+   * the ordinary task pipeline, so mining is verified exactly like collecting.
+   */
+  mine(player, args = [], name = "") {
+    const agent = this.forPlayer(player, name);
+    if (!agent) return noBotMessage(this);
+    if (!canUseBot(player, agent, agent.config)) return "Permission denied: that bot has a different owner.";
+    const request = parseItemRequest(args);
+    if (!request.phrase) return `Usage: ${commandHint(this, "mine stone 16")} — a block name, and optionally how many.`;
+    if (!ALLOWED_MINE_BLOCKS.has(request.block)) {
+      return `§cI can't mine ${request.block}.§r I only break blocks on my safe list (stone, ores, logs, dirt, sand, gravel…). §7That list is what stops an AI plan from ever targeting bedrock, command blocks or a player's build.`;
+    }
+    // The agent announces the task card (or the tool it is missing) itself; an
+    // empty string here means "nothing further to add".
+    agent.mineTask(request.block, request.count ?? 8);
+    return "";
+  }
+
+  /** AC-04/AC-15 `/bot collect 16 oak logs`. */
+  collect(player, args = [], name = "") {
+    const agent = this.forPlayer(player, name);
+    if (!agent) return noBotMessage(this);
+    if (!canUseBot(player, agent, agent.config)) return "Permission denied: that bot has a different owner.";
+    const request = parseItemRequest(args);
+    if (!request.phrase) return `Usage: ${commandHint(this, "collect 16 oak logs")}.`;
+    if (!ALLOWED_MINE_BLOCKS.has(request.block)) {
+      return `§cI can't collect ${request.block}.§r It is not a block I can safely break — try oak logs, stone, dirt, sand, gravel or an ore.`;
+    }
+    agent.createCollectTask(request.block, request.count ?? 8, `Collect ${request.count ?? 8} ${request.block.replace(/^minecraft:/, "").replace(/_/g, " ")}`);
+    return "";
+  }
+
+  /** AC-36 `/bot come` — walk to the player who asked. */
+  come(player, name = "") {
+    const agent = this.forPlayer(player, name);
+    if (!agent) return noBotMessage(this);
+    if (!canUseBot(player, agent, agent.config)) return "Permission denied: that bot has a different owner.";
+    agent.comeTo(player);
+    return "";
+  }
+
+  /** AC-35 `/bot follow`. */
+  follow(player, name = "") {
+    const agent = this.forPlayer(player, name);
+    if (!agent) return noBotMessage(this);
+    if (!canUseBot(player, agent, agent.config)) return "Permission denied: that bot has a different owner.";
+    agent.follow();
+    return "";
+  }
+
+  /** AC-33 `/bot stop`. */
+  stop(player, name = "") {
+    const agent = this.forPlayer(player, name);
+    if (!agent) return noBotMessage(this);
+    if (!canUseBot(player, agent, agent.config)) return "Permission denied: that bot has a different owner.";
+    agent.stop();
+    return "";
+  }
   runNamedCommand(player, name, args) {
     const agent = this.forPlayer(player);
     if (!agent) return noBotMessage(this);

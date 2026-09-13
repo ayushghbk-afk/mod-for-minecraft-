@@ -14,7 +14,8 @@ This repository contains a Bedrock add-on architecture for a player-like compani
 > error in chat, no bot, and `!aibot create Steve` appears to do nothing. This pack now
 > declares the oldest API level it actually needs instead of the newest one that exists.
 - JavaScript Script API pack; no TypeScript build step is required.
-- The project was statically checked and its pure logic was tested with Node. A live Bedrock client/server is not available in this repository, so the live-game checklist in `DEVELOPMENT.md` must be run in Bedrock before release.
+- The whole pack is exercised by **119 Node tests**, 46 of which drive the real `main.js`, controller, planner, action engine and navigation on a simulated Bedrock world (terrain, gravity, distance-aware entity queries, block-break drops, a per-tick clock, chat and slash-command transports). Every acceptance criterion is marked PASS/FAIL with its evidence in **[`ACCEPTANCE.md`](ACCEPTANCE.md)** — nothing is claimed on the strength of "it compiles".
+- A live Bedrock client is not available in this repository, so the parts a simulation cannot prove (visible model, on-screen forms, device frame time, chat transport on your specific build, a real world restart) are listed as human checks in `ACCEPTANCE.md` and `DEVELOPMENT.md` instead of being counted as passing.
 
 ## What is implemented
 
@@ -32,6 +33,22 @@ The behavior pack contains:
 - Offline fallback: follow, stop, return, threat response and deterministic task loops keep working when a provider is unavailable.
 
 See the limitations section below before calling this production-ready for a particular world.
+
+## Verified behaviour (v2.4.0)
+
+```bash
+npm install
+npm run acceptance     # AC-01 … AC-44 as 46 end-to-end tests
+npm test               # acceptance + unit + command + compatibility (119 tests)
+npm run typecheck
+```
+
+**44 / 44 acceptance criteria exercised · 36 PASS · 8 PASS with a named in-game check pending · 0 FAIL.**
+[`ACCEPTANCE.md`](ACCEPTANCE.md) records, per criterion, exactly what was driven and observed —
+and the twelve promise-vs-behaviour bugs that the acceptance work caught and fixed on the way
+(silent `/bot:mine`, a bot that parked itself inside a creeper's blast radius, five-second
+perception latency, following into a wall with no word said, `/bot:stop` walking off anyway, a
+last-resort teleport, and the rest).
 
 ## Download for Bedrock / mobile
 
@@ -228,6 +245,7 @@ this world can keep the log at all.)
 
 ## Documentation
 
+- `ACCEPTANCE.md` — **the verification record**: every acceptance criterion marked PASS/FAIL with the evidence, what a simulation cannot prove, and the bug log.
 - `CONFIGURATION.md` — in-world settings and safe defaults.
 - `AI_PROVIDERS.md` — provider abstraction, proxy, Mideafire/custom/OpenAI-compatible setup.
 - `BOT_COMMANDS.md` — commands, natural-language intents and status output.

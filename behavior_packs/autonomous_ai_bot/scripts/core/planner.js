@@ -2,7 +2,12 @@ import { validatePlan } from "./action-validator.js";
 
 export function fallbackPlan(task) {
   if (!task) return { thought: "No task is active.", goal: "idle", actions: [{ type: "stop" }] };
-  if (task.kind === "collect" && task.block) {
+  // Gathering ("collect 4 oak logs") and mining ("mine 16 stone") are the same
+  // shape of work: find it, walk to where it can be reached, break it, verify
+  // the drop. `mine` used to fall through to the bare `stop` below, so every
+  // /bot:mine order left the bot standing still with an ACTIVE task it would
+  // never finish and never fail — the quietest way to look broken (AC-14).
+  if (task.block && ["collect", "mine", "gather"].includes(String(task.kind || "collect"))) {
     return {
       thought: "Use the bounded local scanner, approach a matching block, mine it, and verify the drop.",
       goal: task.goal,

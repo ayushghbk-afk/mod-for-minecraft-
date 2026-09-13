@@ -121,9 +121,103 @@ function neighbours(dimension, node) {
   return result;
 }
 
+/**
+ * Empty routes that mean "you are already standing at the goal".
+ *
+ * An empty waypoint list is ambiguous: it can mean "arrived" or "there is no way
+ * there". Conflating the two is what made a bot two blocks from a tree report
+ * the tree as unreachable and abandon the task (AC-05/AC-14/AC-15). The flag
+ * lives in a WeakSet so `findLocalRoute` keeps returning a plain array.
+ */
+const arrivedRoutes = new WeakSet();
+
+/** @param {any[]} route @returns {boolean} true when an empty route means "already at the goal" */
+export function routeIsArrival(route) {
+  return Array.isArray(route) && arrivedRoutes.has(route);
+}
+
 function heuristic(a, b) {
   const dx = Math.abs(a.x - b.x), dy = Math.abs(a.y - b.y), dz = Math.abs(a.z - b.z);
   return Math.hypot(dx, dz) + dy * 0.55;
+}
+
+/**
+ * Can the bot swing at this block from where it stands?
+ *
+ * Survival reach is about 4.5 m measured from the eyes, and the eyes sit 1.62 m
+ * above the feet, so a block three up a trunk is perfectly minable from the
+ * ground while a block four blocks sideways is not. Everything the pack does
+ * around mining — where to walk, when to start swinging, whether to report
+ * "unreachable" — has to share one answer to this question (AC-15/AC-32).
+ * @param {{x:number,y:number,z:number}} from foot position of the swinger
+ * @param {{x:number,y:number,z:number}} block integer block position
+ * @returns {boolean}
+ */
+export function withinSwingReach(from, block) {
+  const dx = Number(from.x) - (Number(block.x) + 0.5);
+  const dz = Number(from.z) - (Number(block.z) + 0.5);
+  const horizontal = Math.hypot(dx, dz);
+  const eye = Number(from.y) + 1.62;
+  const vertical = Math.abs(eye - (Number(block.y) + 0.5));
+  return horizontal <= 2.6 && vertical <= 3.4 && horizontal + vertical <= 4.4;
+}
+
+/** "x,y,z" -> { cell, at } — a block does not move, so the answer is reusable. */
+/**
+ * Is the WHOLE cell within swing range, not just its centre?
+ *
+ * Movement stops "within 0.8 of the goal", so a cell picked because its exact
+ * centre sits 2.6 m from the block lets the bot come to rest at 3.4 m — outside
+ * reach — and then report "unreachable" while standing next to the tree it was
+ * sent to fell. Testing the centre plus the four 0.8 m extremes guarantees that
+ * anywhere the bot stops inside that cell, the swing still lands.
+ */
+function cellInReach(cell, block) {
+  for (const [ox, oz] of [[0, 0], [0.8, 0], [-0.8, 0], [0, 0.8], [0, -0.8]]) {
+    if (!withinSwingReach({ x: cell.x + 0.5 + ox, y: cell.y, z: cell.z + 0.5 + oz }, block)) return false;
+  }
+  return true;
+}
+
+const reachCells = new Map();
+
+/**
+ * Where to STAND in order to reach a block.
+ *
+ * "Walk to the block I am going to mine" must not mean "walk into the block":
+ * a log is solid, so routing at the block itself always ended in "no walkable
+ * path". The real goal is the nearest standable cell from which the block is
+ * inside the swing envelope (AC-05/AC-14/AC-15).
+ * @param {any} dimension
+ * @param {{x:number,y:number,z:number}} block
+ * @param {{x:number,y:number,z:number}} origin current bot position; the closer side wins
+ * @param {number} [radius]
+ * @returns {{x:number,y:number,z:number}|null}
+ */
+export function findReachCell(dimension, block, origin, radius = 3) {
+  const cacheKey = `${Math.floor(block.x)},${Math.floor(block.y)},${Math.floor(block.z)}`;
+  const cached = reachCells.get(cacheKey);
+  if (cached && Date.now() - cached.at < 4000 && isSafeCell(dimension, cached.cell)) return cached.cell;
+  let best = null;
+  let bestScore = Infinity;
+  for (let dy = 0; dy >= -3; dy -= 1) {
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      for (let dz = -radius; dz <= radius; dz += 1) {
+        const cell = { x: Math.floor(block.x) + dx, y: Math.floor(block.y) + dy, z: Math.floor(block.z) + dz };
+        if (!isSafeCell(dimension, cell)) continue;
+        if (!cellInReach(cell, block)) continue;
+        // Prefer the side nearest the bot, and the ground over a ledge level
+        // with the block.
+        const score = heuristic(cell, origin) + Math.abs(dy) * 0.45;
+        if (score < bestScore) { best = cell; bestScore = score; }
+      }
+    }
+  }
+  if (best) {
+    if (reachCells.size > 400) reachCells.clear();
+    reachCells.set(cacheKey, { cell: best, at: Date.now() });
+  } else reachCells.delete(cacheKey);
+  return best;
 }
 
 /**
@@ -134,18 +228,58 @@ function heuristic(a, b) {
 export function findLocalRoute(dimension, start, target, options = {}) {
   const maxNodes = options.maxNodes ?? 420;
   const maxRadius = options.maxRadius ?? 28;
+  // How close counts as "there". 1.05 is right for walking to a player or a
+  // dropped item; it is far too loose for a mining stance, where being one cell
+  // short of the chosen cell is the difference between swinging and reporting
+  // "unreachable" (AC-15).
+  const tolerance = Number(options.tolerance) > 0 ? Number(options.tolerance) : 1.05;
   const origin = { x: Math.floor(start.x), y: Math.floor(start.y), z: Math.floor(start.z) };
   const goal = { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) };
 
-  // If the exact goal cell is blocked, aim at the nearest safe neighbour of the goal.
+  // If the exact goal cell is blocked, aim at the nearest cell the bot can
+  // actually STAND in next to it. This is what makes "walk to the block I am
+  // going to mine" work: a log two blocks up a trunk is solid, and none of its
+  // step-neighbours has a floor, so the old neighbour-only search found nothing
+  // and reported "no walkable path" while the bot was standing right under the
+  // tree (AC-05/AC-14/AC-15). A small 3-D ring around the goal always has the
+  // ground cell beside it.
   let goalCell = goal;
   if (!isSafeCell(dimension, goal)) {
     let best = null, bestD = Infinity;
-    for (const n of neighbours(dimension, goal)) {
-      const d = heuristic(n, origin);
-      if (d < bestD) { best = n; bestD = d; }
+    for (let dx = -2; dx <= 2; dx += 1) {
+      for (let dz = -2; dz <= 2; dz += 1) {
+        for (let dy = -2; dy <= 2; dy += 1) {
+          const cell = { x: goal.x + dx, y: goal.y + dy, z: goal.z + dz };
+          if (!isSafeCell(dimension, cell)) continue;
+          // Prefer a cell close to the bot, level with (or below) the goal, and
+          // never a cell further from the goal than the ring itself.
+          const d = heuristic(cell, origin) + Math.abs(dy) * 0.8 + Math.hypot(dx, dz) * 0.35;
+          if (d < bestD) { best = cell; bestD = d; }
+        }
+      }
+    }
+    if (!best) {
+      // Nothing standable beside it — the goal is in the air (a canopy the bot
+      // was sent to investigate, a ledge, a floating block). A player walks
+      // underneath it, so drop a plumb line and stand there. Without this the
+      // bot reported "no walkable path" to a tree it could see (AC-13).
+      for (let dy = -1; dy >= -10 && !best; dy -= 1) {
+        const cell = { x: goal.x, y: goal.y + dy, z: goal.z };
+        if (isSafeCell(dimension, cell)) best = cell;
+      }
     }
     if (best) goalCell = best;
+  }
+
+  // Standing close enough to the (adjusted) goal is ARRIVAL, not failure.
+  // Returning a bare [] here used to be read by the caller as "no walkable path
+  // exists", which is how a bot two blocks from a tree reported the tree as
+  // unreachable and gave up on the whole task (AC-05/AC-14/AC-15).
+  if (Math.hypot(origin.x - goalCell.x, origin.z - goalCell.z) <= tolerance && Math.abs(origin.y - goalCell.y) <= 1) {
+    /** @type {any[]} */
+    const arrived = [];
+    arrivedRoutes.add(arrived);
+    return arrived;
   }
 
   const open = [];
@@ -188,7 +322,7 @@ export function findLocalRoute(dimension, start, target, options = {}) {
     const current = pop();
     const h = heuristic(current, goalCell);
     if (h < bestScore) { best = current; bestScore = h; }
-    if (Math.hypot(current.x - goalCell.x, current.z - goalCell.z) <= 1.05 && Math.abs(current.y - goalCell.y) <= 1) {
+    if (Math.hypot(current.x - goalCell.x, current.z - goalCell.z) <= tolerance && Math.abs(current.y - goalCell.y) <= 1) {
       best = current;
       reached = true;
       break;
@@ -252,7 +386,7 @@ function routeState(entity, target, options = {}) {
     state = {
       targetKey,
       route,
-      noRoute: route.length === 0,
+      noRoute: route.length === 0 && !routeIsArrival(route),
       lastTarget: { x: target.x, y: target.y, z: target.z },
       plannedAt: Date.now(),
       failures: state?.failures || 0,
@@ -277,27 +411,29 @@ function recover(entity, target, state) {
   state.plannedAt = Date.now();
   state.noRoute = state.route.length === 0;
   if (state.noRoute || state.failures < 2) return false;
-  // Teleport is recovery-only after repeated failed replans with no movement —
-  // and only when a REAL route exists but the bot is stuck on it. When no
-  // route exists at all the target is unreachable: teleporting the bot between
-  // neighbouring cells cannot change that, it just made it teleport in place
-  // forever (the reported "bot glitches around" bug on an unreachable target).
+  // A stuck bot is usually pressed flat against a block edge or wedged in a
+  // corner. The unstick is what a PLAYER does — jump and shoulder sideways
+  // toward the most promising neighbouring cell. It used to be a teleport to
+  // that cell, which broke the pack's central promise (AC-06: it walks, it
+  // never teleports) and looked like the bot glitching through walls.
   const origin = { x: Math.floor(entity.location.x), y: Math.floor(entity.location.y), z: Math.floor(entity.location.z) };
   const candidates = neighbours(entity.dimension, origin);
   // Prefer a cell closer to the target.
   candidates.sort((a, b) => distance(a, target) - distance(b, target));
-  for (const candidate of candidates) {
-    try {
-      entity.teleport(
-        { x: candidate.x + 0.5, y: candidate.y, z: candidate.z + 0.5 },
-        { dimension: entity.dimension, facingLocation: target, keepVelocity: false }
-      );
-      state.failures = 0;
-      state.lastProgressAt = Date.now();
-      return true;
-    } catch { /* try next */ }
-  }
-  return false;
+  const best = candidates[0];
+  if (!best) return false;
+  const dx = best.x + 0.5 - entity.location.x;
+  const dz = best.z + 0.5 - entity.location.z;
+  const length = Math.hypot(dx, dz) || 1;
+  try {
+    // applyImpulse both redirects and (on builds where it replaces velocity)
+    // cancels the motion that had the bot pressed into the obstacle.
+    entity.applyImpulse({ x: (dx / length) * 0.24, y: 0.4, z: (dz / length) * 0.24 });
+  } catch { return false; }
+  state.failures = 0;
+  state.lastProgressAt = Date.now();
+  state.unstickAt = Date.now();
+  return true;
 }
 
 /** Face the horizontal movement direction so the model looks like it is walking. */
@@ -408,6 +544,38 @@ export function applyPlayerStep(entity) {
  * WALK_SPEED for normal walking, SPRINT_SPEED to keep up with a player.
  * Teleport is recovery-only (see recover()).
  */
+/**
+ * The next "carrot" on a long walk — AC-06/AC-08.
+ *
+ * A* is deliberately bounded (420 nodes, ~28 blocks) so a phone keeps 20 tps.
+ * The consequence is that a target 40 blocks away is NOT unreachable, it is
+ * simply beyond one search: the bot has to walk it in legs. Without this, every
+ * long walk — follow the player across a valley, go back to a remembered tree,
+ * search a ring 30 blocks out — answered "no walkable path" and the task died.
+ *
+ * The carrot is snapped to a 4-block grid so it does not crawl forward every
+ * tick: an un-snapped carrot invalidates the route cache continuously and
+ * re-runs a full A* five times a second (the storm the cache exists to stop).
+ * @param {{x:number,y:number,z:number}} from
+ * @param {{x:number,y:number,z:number}} target
+ * @param {number} totalDistance
+ * @param {number} legDistance
+ */
+function legTarget(from, target, totalDistance, legDistance) {
+  const dx = (target.x - from.x) / (totalDistance || 1);
+  const dz = (target.z - from.z) / (totalDistance || 1);
+  const snap = (value) => Math.round(value / 4) * 4;
+  let x = snap(from.x + dx * legDistance);
+  let z = snap(from.z + dz * legDistance);
+  // Keep the carrot well ahead of the bot's feet: a 1-block carrot both jitters
+  // the steering and reads as "arrived" for a leg that is not the destination.
+  if (Math.hypot(x - from.x, z - from.z) < 6) {
+    x = from.x + dx * (legDistance + 6);
+    z = from.z + dz * (legDistance + 6);
+  }
+  return { x, y: from.y, z };
+}
+
 export function moveEntityTowards(entity, target, options = {}) {
   if (!target || !entity?.location) {
     stopEntity(entity);
@@ -421,10 +589,25 @@ export function moveEntityTowards(entity, target, options = {}) {
     return { success: true, arrived: true, distance: totalDistance };
   }
 
-  const state = routeState(entity, target, {
+  // Long walks are split into legs the bounded search can actually plan.
+  const legDistance = Number(options.legDistance) || 0;
+  const aim = legDistance > 0 && totalDistance > legDistance
+    ? legTarget(entity.location, target, totalDistance, legDistance)
+    : target;
+
+  const state = routeState(entity, aim, {
     maxNodes: options.maxNodes ?? 420,
-    maxRadius: options.maxRadius ?? 28
+    maxRadius: options.maxRadius ?? 28,
+    tolerance: options.tolerance
   });
+
+  // The goal cell is already under the bot's feet: it has arrived — but only
+  // when that goal IS the destination, not an intermediate carrot.
+  if (routeIsArrival(state.route) && aim === target) {
+    routes.delete(entity.id);
+    stopEntity(entity);
+    return { success: true, arrived: true, distance: totalDistance, atGoal: true };
+  }
 
   // A* found no walkable path at all. Ease to a stop and report the verdict
   // instead of shoving into the obstacle: routeState() re-checks as soon as
@@ -465,7 +648,7 @@ export function moveEntityTowards(entity, target, options = {}) {
     waypoint = state.route[0];
   }
   // If A* found nothing, steer directly — still better than freezing.
-  waypoint ||= { x: target.x, y: target.y, z: target.z };
+  waypoint ||= { x: aim.x, y: aim.y, z: aim.z };
 
   const dx = waypoint.x - entity.location.x;
   const dy = waypoint.y - entity.location.y;

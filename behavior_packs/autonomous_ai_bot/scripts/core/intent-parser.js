@@ -40,7 +40,7 @@ function mentionedBot(message, botNames) {
   return name || null;
 }
 
-function materialToBlock(value) {
+export function materialToBlock(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (BLOCK_ALIASES[raw]) return BLOCK_ALIASES[raw];
   const simplified = raw.replace(/\b(the|some|more|a|an|of|please|for me|me)\b/g, " ").replace(/\s+/g, " ").trim();
@@ -68,8 +68,10 @@ export function parseIntent(message, botNames) {
   if (/\b(cancel|forget|abort)\b/.test(text)) return { bot, type: "cancel" };
   if (/\b(resume|continue)\b/.test(text)) return { bot, type: "resume" };
   if (/\b(stop|stay|wait|halt|freeze)\b/.test(text)) return { bot, type: "stop" };
-  if (/\b(follow|come with me|come here|with me)\b/.test(text)) return { bot, type: "follow" };
-  if (/\b(return|come back|go home|come to me)\b/.test(text)) return { bot, type: "return" };
+  if (/\b(follow|come with me|with me|heel)\b/.test(text)) return { bot, type: "follow" };
+  // AC-07/AC-36: "come here" walks the bot to the player once; it is not the
+  // same standing order as "follow me" (which keeps re-targeting the player).
+  if (/^come\b|\bcome (here|to me|over|back)\b|\b(return|go home|get back here)\b/.test(text)) return { bot, type: "come" };
   if (/\b(protect|defend|guard|fight for me|kill mobs)\b/.test(text)) return { bot, type: "protect" };
   if (/\b(what are you doing|status|how much more|progress|report)\b/.test(text)) return { bot, type: "status" };
   if (/\b(pick ?up|collect drops|loot|grab (the )?items?)\b/.test(text)) {
@@ -125,4 +127,52 @@ export function parseBotCommand(message) {
   const parts = rest.match(/^([^\s]+)(?:\s+(.+))?$/);
   if (!parts) return { command: "help", args: [] };
   return { command: parts[1].toLowerCase(), args: (parts[2] || "").trim().split(/\s+/).filter(Boolean) };
+}
+
+/**
+ * Parse "<count> <material>" (in either order, with or without the count) out
+ * of a command argument list or a free-text order.
+ *
+ *   "16 oak logs"  → { block: "minecraft:oak_log", count: 16 }
+ *   "stone"        → { block: "minecraft:stone",   count: null }
+ *   "mine 8 stone" → { block: "minecraft:stone",   count: 8, verb: "mine" }
+ *
+ * Shared by the chat intents and the /bot:* slash commands so both spellings
+ * produce the same task (AC-04, AC-14, AC-15).
+ *
+ * @param {string|string[]} input
+ * @returns {{block:string, count:number|null, verb:string, phrase:string}}
+ */
+export function parseItemRequest(input) {
+  const text = (Array.isArray(input) ? input.join(" ") : String(input || "")).toLowerCase().replace(/[.,!?]/g, " ").replace(/\s+/g, " ").trim();
+  const verbs = ["collect", "gather", "get", "fetch", "bring", "mine", "chop", "cut", "dig", "find"];
+  const tokens = text.split(" ").filter(Boolean);
+  const verb = tokens.find((token) => verbs.includes(token)) || "";
+  const countToken = tokens.find((token) => /^\d+$/.test(token));
+  const count = countToken ? Math.max(1, Math.min(64, Number(countToken))) : null;
+  const phrase = tokens
+    .filter((token) => token !== verb && token !== countToken)
+    .filter((token) => !["me", "some", "the", "of", "for", "please", "blocks", "block", "items", "item", "logs", "log"].includes(token) || /log/.test(token))
+    .join(" ")
+    .trim();
+  // "oak logs" → oak_log: materialToBlock already knows the plural aliases, so
+  // only the trailing "s" of an unknown word has to be handled here.
+  const candidate = phrase || text;
+  const block = materialToBlock(candidate.replace(/\bs$/g, ""));
+  return { block, count, verb, phrase: candidate };
+}
+
+/**
+ * Parse an order that arrives WITHOUT the bot's name in it — which is how every
+ * supported input path other than chat works (/bot:say "collect 16 oak logs",
+ * the panel's text field, /scriptevent). The name is prepended so the exact same
+ * intent parser answers all of them; AC-03 must not depend on the transport.
+ *
+ * @param {string} text the player's words
+ * @param {string} botName the bot that should treat them as an order
+ */
+export function parseOrder(text, botName) {
+  const words = String(text || "").trim();
+  if (!words) return null;
+  return parseIntent(`${botName}, ${words}`, [botName]);
 }
