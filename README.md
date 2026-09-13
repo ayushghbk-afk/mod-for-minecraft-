@@ -103,12 +103,20 @@ commands exist. Exact controls:
 /aibot:list
 /aibot:remove <name>
 /aibot:info
+/aibot:debug on|log|watch|clear|off
+/aibot:test [net]
 ```
 
 `/aibot:info` prints script version, which chat signal the pack bound to, how many slash
 commands registered, whether the tick loop is running, how many `aibot:companion` entities
-exist per dimension, and the last spawn error. It is the first thing to run when the bot
-"does nothing".
+exist per dimension, and the last spawn error.
+
+When the bot "does nothing", **`/aibot:test`** is the faster first step: it exercises every
+dependency (entity registration, a real spawn probe, world persistence, movement APIs,
+`runCommand` permissions, chunk access, the tick loop's measured liveness, the provider
+endpoint) and prints a verdict per subsystem with the fix. Pair it with
+**`/aibot:debug on`**, which prints every error the pack catches as it happens — see
+[`BOT_COMMANDS.md`](BOT_COMMANDS.md#test-mode--its-not-working-without-a-console).
 
 Forgiving input: when chat works, `aibot create Steve`, `!bot create Steve` and
 `!aibot: create Steve` are all accepted as chat messages.
@@ -182,7 +190,19 @@ The default configuration uses the supplied Cloudflare Worker at `https://groq-p
 > pack whose entity format version is too high, and a regression test locks it in.
 > **Re-import `AI-Bot-Bedrock-Mobile.mcaddon` (v2.0.1) and leave exactly one copy of the pack active.**
 
-Work through this in order; the first line that is false is your cause.
+> ### Start here (v2.3.0): make the pack show you the error
+>
+> Run **`/aibot:debug on`** and then **`/aibot:test`**. Test mode streams *every* error the
+> pack catches into chat — the tick loop, navigation, mining, the AI request, the entity spawn
+> — with repeats folded into `×N`, and `/aibot:debug log` shows what was already captured
+> (including before you joined, and across a world reload). The self-test then walks the whole
+> dependency list and prints a `✔ pass / ✖ fail / ▲ degraded` line for each part, each failure
+> with the fix, including a spawn probe and one question you have to answer ("do you see the
+> test entity?") because that is the only way a script can tell *"no model"* apart from
+> *"no entity"*. On builds with no chat events at all, the same buttons live in the compass
+> menu (**Diagnostics**), and `/scriptevent aibot:cmd test` works with cheats on.
+>
+> Work through the table below in order; the first line that is false is your cause.
 
 | Check | Fix |
 |---|---|
@@ -195,10 +215,16 @@ Work through this in order; the first line that is false is your cause.
 | You typed `/aibot:create` (namespaced, with the colon) | A bare `/aibot` has never existed as a slash command; every command is `/aibot:<action>`, e.g. `/aibot:create Steve`, `/aibot:help`. |
 | `/aibot:info` replies | If it replies but `create` fails, it prints the real spawn error (usually the behaviour pack is applied but the entity type is not registered — re-add the pack to the world). `/aibot:info` also prints the `Duplicate packs:` line — anything other than `none detected` means deactivate the older copy as above. |
 | Chat is not muted/filtered and you are not on a server that strips `!` messages | Ask the server owner, or use the compass UI instead of chat. |
+| `/aibot:test` shows a red `✖` line | That is the answer: the failing check names the subsystem (entity registration, movement APIs, `runCommand` refused without cheats, unloaded chunks, buried bot, unreachable path) and the fix. `/aibot:debug log` lists the same failures with the game's own error text and the script's stack frame. |
+| The bot is created, says "Following you", and does not move | Run `/aibot:debug watch 60`. Every follow verdict is then printed: `No walkable path to the target.` means the terrain (not the mod) is the problem — the bot never teleports by design. A `movement step` or `bot tick` error means the loop is throwing; those lines name the file and function. |
+| The bot is *invisible* but `/aibot:status` finds it | `✖ visible model` from the self-test: the behaviour pack is working and the **resource** pack is not active (or its client entity was rejected). Activate `Autonomous AI Bot - Resources` on this world and reload. |
 
 Verbose content log (Windows Bedrock: `Settings → Creator → Enable Content Log`, or launch
-with `-verboseLogging`) prints `[aibot] script v… loaded; chat source: …`, which confirms the
-module loaded and which chat event it bound to.
+with `-verboseLogging`) prints `[aibot] script v… loaded; chat source: …`, and — since v2.3.0 —
+an `[aibot:test] <level> <subsystem>: <message>` line for every caught error, whether or not
+test mode is on in the game. Errors are captured to the in-world log on the same path, so the
+two views never disagree. (`/aibot:debug status` prints `Persistence:` so you can tell whether
+this world can keep the log at all.)
 
 ## Documentation
 

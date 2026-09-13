@@ -145,6 +145,19 @@ class Block {
 
 const KNOWN_ENTITY_TYPES = new Set(["aibot:companion", "minecraft:item", "minecraft:zombie"]);
 
+/**
+ * Stable `EntityTypes` (the read-only registry `Dimension.spawnEntity` checks
+ * against). The self-test uses it to ask "did the game register our entity at
+ * all?" without spawning anything, so the stub has to answer like the game:
+ * `undefined` for a type whose JSON the pack failed to contribute.
+ */
+export class EntityTypes {
+  static get(identifier) {
+    return KNOWN_ENTITY_TYPES.has(String(identifier)) ? { id: String(identifier), localizationKey: `entity.${String(identifier).replace(/\./g, "_")}` } : undefined;
+  }
+  static getAll() { return [...KNOWN_ENTITY_TYPES].map((id) => ({ id, localizationKey: `entity.${id.replace(/\./g, "_")}` })); }
+}
+
 export class Dimension {
   constructor(id) {
     this.id = id;

@@ -14,6 +14,37 @@ import { validateNamedCommand, canUseBot } from "./permissions.js";
 import { commandHint, talkHint, noBotMessage } from "./hints.js";
 
 const BOT_ENTITY_ID = "aibot:companion";
+/**
+ * A no-op stand-in for the test-mode harness. main.js replaces
+ * `controller.test` with a real TestMode instance, but agents are also built by
+ * unit tests and by the world-load restore path, where no harness may exist.
+ * The important part is that `guard()` *runs* the action: an agent must never
+ * silently skip its own behaviour because the debugger is absent.
+ */
+/** @type {any} */
+const SILENT_TEST = Object.freeze({
+  enabled: false,
+  watching: false,
+  entries: [],
+  liveness: { tps: 0, tick: 0, aiBeat: -1, moveBeat: -1, stalled: false, movementStalled: false },
+  error() { return null; },
+  warn() { return null; },
+  note() { return null; },
+  guard(_where, action) { return action(); },
+  beat() {},
+  persist() {},
+  clear() {},
+  recent() { return []; },
+  errorCount() { return 0; },
+  warnCount() { return 0; },
+  logLines() { return []; },
+  statusLines() { return []; },
+  setEnabled() { return false; },
+  setWatch() {},
+  onPlayerJoin() {},
+  handle() { return false; },
+  runSelfTest() { return false; }
+});
 const DIMENSIONS = ["overworld", "nether", "the_end"];
 const DROP_FOR_BLOCK = Object.freeze({
   "minecraft:iron_ore": "minecraft:raw_iron", "minecraft:gold_ore": "minecraft:raw_gold",
@@ -88,7 +119,8 @@ class BotAgent {
       lastPlanAt: 0, planning: null, planFailures: 0, lastMinedKey: "", lastMinedAt: 0,
       lastAttackAt: 0, returningAfterTask: false, stuck: new StuckDetector(), exploreTarget: null,
       aiErrorShown: false, lastPersistAt: 0, tick: 0, lastAction: null, lastPlan: null,
-      lastAIRequest: "none", lastAIResponse: "none", lastValidation: "not run", lastPlanReason: "none", inventoryFullReturn: false
+      lastAIRequest: "none", lastAIResponse: "none", lastValidation: "not run", lastPlanReason: "none", inventoryFullReturn: false,
+      tickFailures: 0, lastFollowResult: "not running"
     };
     this.status = readBotStatus(entity);
     this.setName();
@@ -113,6 +145,8 @@ class BotAgent {
   entityInventoryIsFull() { const inventory = readInventory(this.entity); return inventory.size > 0 && inventory.freeSlots === 0; }
   progressText() { const task = this.tasks.current; return task ? `${task.progress}/${task.target}` : ""; }
   notify(message) { this.owner()?.sendMessage(`§b[${this.name}]§r ${message}`); }
+  /** Never null: see SILENT_TEST. Everything that can throw goes through it. */
+  get test() { return this.controller?.test || SILENT_TEST; }
 
   /**
    * Reply in chat like a teammate. Always goes to the owner (and optionally the
@@ -169,13 +203,16 @@ class BotAgent {
   }
   persist(force = false) {
     if (!force && this.runtime.tick - this.runtime.lastPersistAt < 100) return;
-    try {
+    // Tasks, memory and config all live in dynamic properties. A rejected write
+    // (property size cap, unloading entity) used to vanish here, which is why a
+    // bot can "forget" its task after a reload with no explanation anywhere.
+    this.test.guard("persist bot", () => {
       this.entity.setDynamicProperty("aibot:tasks", JSON.stringify(this.tasks.snapshot()));
       this.entity.setDynamicProperty("aibot:memory", JSON.stringify(this.memory.snapshot()));
       this.entity.setDynamicProperty("aibot:config", JSON.stringify(this.config));
       if (this.runtime.home) this.entity.setDynamicProperty("aibot:home", JSON.stringify(positionArray(this.runtime.home)));
       this.runtime.lastPersistAt = this.runtime.tick;
-    } catch { /* dynamic property writes can fail during entity removal */ }
+    }, undefined, { level: "warn", context: `${this.name}: task progress and memory may not survive a reload` });
   }
 
   setPlan(plan) {
@@ -228,8 +265,14 @@ class BotAgent {
       this.runtime.lastValidation = `fallback after rejection: ${String(error).slice(0, 100)}`;
       this.setPlan(this.runtime.lastPlan);
       this.memory.event(`AI unavailable: ${String(error).slice(0, 140)}; deterministic fallback used.`, "error");
+      // The provider failing is normal on Bedrock mobile (no fetch), so it is a
+      // recorded error rather than a chat shout — unless the player asked to see
+      // everything, in which case test mode echoes it line by line.
+      this.test.error("AI provider", error, {
+        context: `${this.config.provider}/${this.config.model || "no model"} at ${String(this.config.endpoint || "no endpoint").slice(0, 40)}`
+      });
       if (!this.runtime.aiErrorShown && this.config.provider !== "fallback") {
-        this.notify("§e⚠ AI unavailable. Using fallback behavior.");
+        this.notify("§e⚠ AI unavailable. Using fallback behavior. §f/aibot:debug log §eshows why; §f/aibot:test net §eshows the endpoint verdict.");
         this.runtime.aiErrorShown = true;
       }
     }
@@ -256,7 +299,10 @@ class BotAgent {
   useHeldItem(itemId) {
     const result = useItem(this.entity, itemId);
     if (result.success) this.say(`Using ${itemId.replace(/^minecraft:/, "").replace(/_/g, " ")}.`);
-    else this.say(`Can't use that: ${result.reason}`);
+    else {
+      this.test.note("use item", `refused: ${result.reason}`, { level: "warn", context: this.name });
+      this.say(`Can't use that: ${result.reason}`);
+    }
     return result;
   }
 
@@ -482,6 +528,12 @@ class BotAgent {
     this.runtime.planFailures += 1;
     this.runtime.targetBlock = null;
     this.runtime.plan = null;
+    // Every failed action used to be swallowed here; the reason is exactly what
+    // a player needs ("no walkable path", "no tool", "block is not mineable").
+    this.test.note("action failed", `${result.action || "action"}: ${result.reason || "no reason given"}`, {
+      level: "warn",
+      context: `${this.name} · plan step ${(this.runtime.planIndex || 0) + 1} · failure ${this.runtime.planFailures + 1}/4`
+    });
     setBotStatus(this.entity, BotState.ERROR, { target: result.reason || "action failed" });
     if (this.runtime.planFailures >= 4) {
       this.tasks.fail(result.reason || "Action failed repeatedly.");
@@ -533,7 +585,23 @@ class BotAgent {
     if (this.handleCombat()) { this.persist(); return true; }
 
     if (this.runtime.follow && (!this.tasks.current || this.tasks.current.status !== TaskStatus.ACTIVE)) {
-      this.engine.execute({ type: "follow_player" });
+      /** @type {any} */
+      let step = null;
+      try {
+        step = this.engine.execute({ type: "follow_player" });
+      } catch (error) {
+        this.test.error("follow step", error, { context: this.name });
+      }
+      // "It says Following you but never moves" is the most common complaint in
+      // the wild, and the engine's verdict used to be thrown away. Under test
+      // mode (or tracing) every non-arriving verdict is visible, folded by reason.
+      // `pending` is the engine saying "still walking" — the normal case, and it
+      // must never be reported as a failure (that would make tracing useless).
+      if (step && !step.success && !step.arrived && !step.pending) {
+        this.runtime.lastFollowResult = step.reason || "no reason given";
+        this.test.note("follow", `follow_player → ${this.runtime.lastFollowResult} (${Math.round(step.distance ?? -1)}m away)`, { level: "warn", context: this.name });
+      } else if (step) this.runtime.lastFollowResult = step.arrived ? "arrived" : "walking";
+      else this.runtime.lastFollowResult = "engine threw (see the error log)";
     } else if (!this.runtime.plan && !this.runtime.follow) {
       // Idle — release the movement keys so the bot eases to a player-like stop.
       if (tick % 10 === 0) stopEntity(this.entity);
@@ -569,7 +637,8 @@ class BotAgent {
     const status = readBotStatus(this.entity);
     const health = this.entity.getComponent("minecraft:health");
     const inventory = readInventory(this.entity);
-    return `${this.name}\nStatus: ${status.state}${status.block ? ` ${status.block}` : ""}\nTask: ${task?.goal || "None"}\nProgress: ${task ? `${task.progress}/${task.target}` : "-"}\nHealth: ${health ? `${Math.ceil(health.currentValue)}/${Math.ceil(health.effectiveMax ?? health.defaultValue ?? 20)}` : "unknown"}\nInventory: ${inventory.slots.length}/${inventory.size}\nAI: ${this.config.provider === "fallback" ? "fallback" : (this.runtime.aiErrorShown ? "unavailable / fallback" : this.config.provider)}`;
+    const follow = this.runtime.follow ? `Follow: ${this.runtime.lastFollowResult || "walking"}` : "Follow: off";
+    return `${this.name}\nStatus: ${status.state}${status.block ? ` ${status.block}` : ""}\nTask: ${task?.goal || "None"}\nProgress: ${task ? `${task.progress}/${task.target}` : "-"}\nHealth: ${health ? `${Math.ceil(health.currentValue)}/${Math.ceil(health.effectiveMax ?? health.defaultValue ?? 20)}` : "unknown"}\nInventory: ${inventory.slots.length}/${inventory.size}\n${follow}\nAI: ${this.config.provider === "fallback" ? "fallback" : (this.runtime.aiErrorShown ? "unavailable / fallback" : this.config.provider)}`;
   }
 
   debugText() {
@@ -585,7 +654,10 @@ class BotAgent {
       `AI: ${this.runtime.aiErrorShown ? "UNAVAILABLE / FALLBACK" : this.config.provider}`, `LAST PLAN: ${this.runtime.lastPlanReason}`,
       `AI REQUEST: ${this.runtime.lastAIRequest}`, `AI RESPONSE: ${this.runtime.lastAIResponse}`,
       `ACTION VALIDATION: ${this.runtime.lastValidation}`, `INVENTORY: ${readInventory(this.entity).slots.length}/${readInventory(this.entity).size}`,
-      `MEMORY EVENTS: ${this.memory.snapshot().shortTerm.length}`
+      `FOLLOW VERDICT: ${this.runtime.lastFollowResult || "-"}`,
+      `MOVEMENT LOOP: ${this.controller?.test?.liveness?.movementStalled ? "STALLED (bots cannot walk)" : "running"}`,
+      `MEMORY EVENTS: ${this.memory.snapshot().shortTerm.length}`,
+      `§7Errors are listed by §f/aibot:debug log§7; the check-up is §f/aibot:test§7§r`
     ].join("\n");
   }
 
@@ -602,12 +674,26 @@ export class BotController {
   constructor() {
     this.agents = new Map();
     this.tickCount = 0;
+    /**
+     * The test-mode harness (see core/testmode.js). main.js swaps in the live
+     * instance; until then every capture call is a no-op that still runs the
+     * guarded code.
+     * @type {any}
+     */
+    this.test = SILENT_TEST;
+    /**
+     * While the self-test's probe entity exists, main.js's auto-registration
+     * hook is paused so a throwaway entity is never adopted as a real bot.
+     * @type {{suppressAutoRegister:boolean}}
+     */
+    this.probe = { suppressAutoRegister: false };
     /** Filled in by main.js so `!aibot info` can explain a silent failure. */
     this.diagnostics = {
       scriptVersion: "unknown", chatSource: "unbound", itemUseSource: "unbound",
       slashCommands: "unknown (startup event has not fired yet)", scriptEvent: "unbound",
       engineStarted: false, tickJob: false, spawnFailures: 0, lastSpawnError: "",
-      duplicate: "not checked yet"
+      duplicate: "not checked yet", interactSource: "unknown",
+      testMode: "not started", errorLog: "not started"
     };
   }
   register(entity) {
@@ -741,6 +827,12 @@ export class BotController {
     if (!entity) {
       this.diagnostics.spawnFailures += 1;
       this.diagnostics.lastSpawnError = lastError;
+      // Recorded here, explained in chat by reportCreate(): the friendly reason
+      // already names this error, so echoing both would only double the panic.
+      // `/aibot:test` re-runs the same spawn and prints the raw verdict.
+      this.test.error("spawn bot", lastError || "spawnEntity returned nothing", {
+        context: `${name} attempted at ${ordered.length} position(s) near ${player.name}`
+      });
       return {
         agent: null, created: false,
         reason: `Could not spawn ${BOT_ENTITY_ID}. ${lastError ? `Game said: ${lastError}. ` : ""}`
@@ -772,7 +864,10 @@ export class BotController {
     setBotStatus(entity, BotState.IDLE);
     agent.persist(true);
     const at = `${Math.round(entity.location.x)}, ${Math.round(entity.location.y)}, ${Math.round(entity.location.z)}`;
-    player.sendMessage(`§a✔ Created ${name}§a, standing at ${at}.§r Use §e${commandHint(this, "panel")}§r, §e${commandHint(this, "follow")}§r, or ${talkHint(this, name)}.`);
+    // talkHint already names the follow option on this build, so the sentence
+    // below must not list it a second time — the old wording read
+    // "…use /aibot:follow, or tap AIBot, or use /aibot:follow".
+    player.sendMessage(`§a✔ Created ${name}§a, standing at ${at}.§r ${talkHint(this, name)} §7· §e${commandHint(this, "panel")} §7opens the control panel§r`);
     player.sendMessage(`§7If you see the name but no body — or nothing at all — the resource model is missing: open Edit World → Add-Ons, confirm "Autonomous AI Bot - Resources" is active, then reload the world. §r`);
     return { agent, created: true };
   }
@@ -798,6 +893,13 @@ export class BotController {
     }).join("\n") || "  (none loaded)";
     let dimensions = "unknown";
     try { dimensions = DIMENSIONS.map((id) => `${id}:${world.getDimension(id).getEntities({ type: BOT_ENTITY_ID }).length}`).join(" "); } catch { /* dimension query unavailable */ }
+    const log = this.test;
+    const logged = typeof log?.errorCount === "function" ? log.errorCount() : 0;
+    const warned = typeof log?.warnCount === "function" ? log.warnCount() : 0;
+    d.errorLog = `${logged} error(s), ${warned} warning(s) — /aibot:debug log`;
+    d.testMode = log && log !== SILENT_TEST
+      ? (log.enabled ? "ON — new errors appear in chat" : "off — errors are recorded, not echoed (/aibot:debug on)")
+      : "not loaded";
     return [
       `§bAI Bot diagnostics§r`,
       `Script: v${d.scriptVersion} (loaded — this message proves the script engine is running)`,
@@ -810,16 +912,41 @@ export class BotController {
       `Entities in world: ${dimensions}`,
       `Registered bots: ${this.all().length}`, bots,
       `Spawn failures: ${d.spawnFailures}${d.lastSpawnError ? ` — last: ${d.lastSpawnError}` : ""}`,
+      `Test mode: ${d.testMode}`,
+      `Error log: ${d.errorLog}`,
       `§7Bot invisible?§r If a bot above is "loaded" you should at least see its name tag. ` +
         `No body + no name → the entity did not spawn (check the "Entities in world" line). ` +
         `Name but no body → the render model is missing: Edit World → Add-Ons → activate ` +
-        `"Autonomous AI Bot - Resources", then reload the world.`
+        `"Autonomous AI Bot - Resources", then reload the world.\n` +
+      `§eOr run §f/aibot:test§e — it checks all of this automatically, and §f/aibot:debug on§e streams every error the pack catches.`
     ].join("\n");
   }
   tick() {
     this.tickCount += 1;
     for (const [id, agent] of this.agents) {
-      if (!agent.tick(this.tickCount)) this.agents.delete(id);
+      // One agent must never kill the loop for everybody else. Before this, a
+      // single throwing bot stopped every other bot in the world and the whole
+      // failure was invisible on mobile — the classic "bot frozen" report.
+      let outcome = null;
+      try {
+        outcome = { alive: agent.tick(this.tickCount) };
+      } catch (error) {
+        this.test.error("bot tick", error, { context: `${agent.name} (agent ${id})` });
+      }
+      if (outcome === null) {
+        // A throwing agent used to be indistinguishable from a dead world: the
+        // loop carried on and the bot simply stopped acting. After a second of
+        // failures the owner is told, once, instead of on every tick.
+        agent.runtime.tickFailures = (agent.runtime.tickFailures || 0) + 1;
+        if (agent.runtime.tickFailures === 12) {
+          agent.runtime.tickFailures = 0;
+          agent.notify(`§c⚠ ${agent.name} keeps failing every tick and is now idle. §f/aibot:debug log §rprints the error, §f/aibot:test §rchecks what is broken.`);
+          try { setBotStatus(agent.entity, BotState.ERROR, { target: "script errors — run /aibot:debug log" }); } catch { /* entity gone */ }
+        }
+      } else {
+        if (agent.runtime.tickFailures) agent.runtime.tickFailures = 0;
+        if (outcome.alive === false) this.agents.delete(id);
+      }
     }
   }
   /**
@@ -832,12 +959,24 @@ export class BotController {
   stepMovement() {
     for (const agent of this.agents.values()) {
       if (!isValidEntity(agent.entity)) continue;
-      try { applyPlayerStep(agent.entity); } catch { /* entity unloading */ }
+      // Runs every game tick for every bot, so the happy path is a bare
+      // try/catch — and repeats are folded by signature. An error here means
+      // "the bot is being steered and refuses to move", otherwise invisible.
+      try {
+        applyPlayerStep(agent.entity);
+      } catch (error) {
+        this.test.warn("movement step", error, {
+          context: `${agent.name} at ${Math.round(agent.entity.location.x)}, ${Math.round(agent.entity.location.y)}, ${Math.round(agent.entity.location.z)}`
+        });
+      }
     }
   }
   handleDeath(entity) {
     const agent = this.agents.get(entity.id);
     if (!agent) return;
+    this.test.warn("bot died", `${agent.name} was killed at ${Math.round(entity.location?.x || 0)}, ${Math.round(entity.location?.y || 0)}, ${Math.round(entity.location?.z || 0)}`, {
+      context: "the entity is gone; re-create it with /aibot:create (the task stays in its memory)"
+    });
     agent.notify("§cI died. My task remains in memory, but I need to be spawned again.");
     agent.memory.event("Bot died; task state persisted.", "error");
     agent.persist(true);
@@ -854,6 +993,16 @@ export class BotController {
     if (!checked.ok) return checked.reason;
     const safeSay = args.join(" ").replace(/[\r\n]/g, " ").replace(/[^A-Za-z0-9 _.,!?'-]/g, "").slice(0, 160);
     const commands = { time: `time set ${args[0]}`, weather: `weather ${args[0]}`, say: `say ${safeSay}` };
-    try { player.dimension.runCommand(commands[checked.command]); return `Allowed command executed: ${checked.command}.`; } catch (error) { return `Command failed: ${String(error)}`; }
+    try {
+      player.dimension.runCommand(commands[checked.command]);
+      return `Allowed command executed: ${checked.command}.`;
+    } catch (error) {
+      // On a world without cheats every script command throws; the log line is
+      // the explanation the chat reply alone cannot carry.
+      this.test.error("named command", error, {
+        context: "script runCommand needs cheats enabled; on this build it may not exist at all"
+      });
+      return `Command failed: ${String(error?.message || error).slice(0, 160)} §7— also in §f/aibot:debug log§r`;
+    }
   }
 }

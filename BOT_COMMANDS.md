@@ -25,6 +25,14 @@ registered during the script startup event with `permissionLevel: Any` and
 | `/aibot:resume` | Resume a paused task after recovery |
 | `/aibot:remove <name>` | Despawn a bot you own and free its name |
 | `/aibot:info` | Script version, chat binding, slash registration, tick loop, entity counts and last spawn error |
+| `/aibot:debug on` | **Test mode**: every error the pack catches is printed in chat, live |
+| `/aibot:debug log [n]` | The captured error log (last `n`, default 15) — newest first, with `×N` repeat counts |
+| `/aibot:debug watch 60` | Verbose tracing for 60 s: bot decisions, movement verdicts, plan results |
+| `/aibot:debug clear` | Empty the log (it is stored in the world and survives reloads) |
+| `/aibot:debug status` | Mode, counters, echo queue and measured loop liveness |
+| `/aibot:test` | The self-test: 20+ checks over packs, events, entity, model, movement, mining and persistence |
+| `/aibot:test net` | The same, plus one real request to the configured AI endpoint |
+| `/aibot:errors` | Shorthand for `/aibot:debug log` |
 
 The name parameter is optional where it makes sense (`status`, `inventory`, `follow`, `stop`,
 `return`, `protect`, `cancel`, `resume`, `remove`); without it the command targets your own bot.
@@ -42,7 +50,11 @@ script** and the slash commands above are the only text interface.
 | `!aibot help` | Show help |
 | `!aibot panel` | Open control UI |
 | `!aibot allow on` | Enable named allowlisted server commands |
-| `!aibot debug on` | Enable per-bot debug setting |
+| `!aibot debug on` | Test mode: stream every caught error into chat (also turns on the per-bot debug dump) |
+| `!aibot debug log` | The captured error log |
+| `!aibot debug bot on` | Per-bot debug dump only, without the error stream |
+| `!aibot test` | Run the self-test |
+| `!aibot test net` | Self-test including a live request to the AI endpoint |
 
 The UI exposes provider, model, personality, combat mode, command and debug settings. It never exposes an API-key field.
 
@@ -67,6 +79,43 @@ The UI exposes provider, model, personality, combat mode, command and debug sett
 Use the `/aibot:*` slash commands above, or hold a **compass** and use it to open the create
 form (or the control panel once you own a bot). Interacting with the bot entity also opens
 its panel, which matters on touch screens where chat is awkward.
+
+## Test mode — "it's not working" without a console
+
+Mobile players have no content log to read, and until v2.3.0 nearly every `catch` in the
+pack could swallow a failure silently: the bot tick loop, navigation, the provider request
+and even the entity spawn could throw every single tick with nothing printed anywhere. Test
+mode is the answer to that class of report.
+
+| Command | What it does |
+|---|---|
+| `/aibot:debug on` | Echoes every error into chat, tagged `[TEST]`. Identical errors are folded into `×N` (20 s window) so a per-tick failure cannot flood the chat, and at most 6 lines are released per flush. |
+| `/aibot:debug log` | The last 30 captured problems — **including ones from before test mode was turned on**, and from before the last world reload. |
+| `/aibot:debug watch 60` | Also traces non-error decisions (follow verdicts, action failures, plan requests) for a bounded window. |
+| `/aibot:test` | Runs the check-up below and prints a verdict per subsystem. Every failure it finds is also written into the error log. |
+| `/aibot:debug off` | Stops echoing. Errors keep being recorded. |
+
+Failures that make the whole pack look dead (a refused entity spawn, a restore that could not
+re-adopt bots, an AI loop that stopped ticking, a refused command registration) are echoed
+even when test mode is off, because there is no other way to notice them.
+
+State lives in two world dynamic properties: `aibot:testmode` (the switch) and `aibot:testlog`
+(the bounded log). Both are per world, and clearing the log removes the property entirely.
+
+### What `/aibot:test` checks
+
+| Group | Checks |
+|---|---|
+| Script loading | module is alive; every needed API export exists; the AI loop and the movement job are actually ticking (measured, incl. ticks/second); no second copy of the pack is running |
+| Commands & menus | chat events, `/aibot:*` registration (`n/total` from the real `registerCommand` results), `/scriptevent` bridge, compass menu binding, tap-a-bot binding |
+| World & pack | world dynamic properties can round-trip; `aibot:companion` is a registered entity type; a **real probe entity** can be spawned and read; its inventory component works; chunks around the player can be read; **and it asks you one question** — "do you see the probe?" — which is the only way a script can tell "no model" from "no entity" |
+| Your bot | per bot: state, position, distance to you, follow flag, current plan and step, task progress, health, last action **and its failure reason**, last validation verdict, plus a live A\* route from the bot to you |
+| Movement & mining | `getVelocity`/`setVelocity`/`setRotation`/`teleport` availability, ground state, whether the bot is standing in a valid cell, and whether the game accepts a script `runCommand` at all (that is what decides whether mining works without cheats) |
+| AI provider | the per-bot config, endpoint sanity (`https`), whether this build has `fetch`, and — with `/aibot:test net` — one real request whose HTTP status and body excerpt are quoted verbatim |
+
+A check that throws is reported as a failure with the raw error text; a check never aborts the
+run, and the report is chunked into several chat messages because Bedrock truncates long ones.
+If the dialog cannot be answered the visual check is reported as *skipped*, never as a pass.
 
 ## Natural language
 

@@ -52,7 +52,7 @@ test("all /aibot:* slash commands register with a valid, non-cheating schema", (
   const registry = makeRegistry();
   bedrock.fireStartup(registry);
 
-  assert.equal(registry.registrations.size, 14, "every documented action needs a slash command");
+  assert.equal(registry.registrations.size, 16, "every documented action needs a slash command");
   for (const [name, { spec }] of registry.registrations) {
     assert.match(name, /^aibot:[a-z]+$/, `${name} must be namespaced or the game rejects it`);
     assert.equal(spec.permissionLevel, bedrock.CommandPermissionLevel.Any, `${name} must be usable by any player`);
@@ -64,7 +64,9 @@ test("all /aibot:* slash commands register with a valid, non-cheating schema", (
   assert.ok(registry.registrations.has("aibot:create"));
   assert.ok(registry.registrations.has("aibot:help"));
   assert.ok(registry.registrations.has("aibot:panel"));
-  assert.match(globalThis.__aibotController.diagnostics.slashCommands, /14\/14 registered/);
+  assert.ok(registry.registrations.has("aibot:debug"), "test mode must be reachable without chat");
+  assert.ok(registry.registrations.has("aibot:test"), "the self-test must be reachable without chat");
+  assert.match(globalThis.__aibotController.diagnostics.slashCommands, /16\/16 registered/);
 });
 
 test("/aibot:create Slashbot spawns a real owner-bound bot without any chat", () => {

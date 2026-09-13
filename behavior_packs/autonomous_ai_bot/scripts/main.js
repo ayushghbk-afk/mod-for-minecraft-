@@ -7,24 +7,61 @@ import {
 } from "@minecraft/server";
 import { BotController } from "./core/bot-controller.js";
 import { handleChat } from "./chat.js";
-import { isCommandMessage, parseBotCommand } from "./core/intent-parser.js";
+import { isCommandMessage } from "./core/intent-parser.js";
 import { showControlPanel, showCreateBot } from "./ui/control-panel.js";
 import { SCRIPT_VERSION } from "./core/version.js";
 import { commandHint, talkHint } from "./core/hints.js";
+import { TestMode } from "./core/testmode.js";
 
 export { SCRIPT_VERSION };
 
 const controller = new BotController();
 controller.diagnostics.scriptVersion = SCRIPT_VERSION;
 
-function safeSubscribe(signal, callback) {
-  try { signal?.subscribe(callback); return Boolean(signal); } catch { return false; }
+/**
+ * TEST MODE — the pack's error stream.
+ *
+ * Every `catch` in this file (and in the controller) used to be able to swallow
+ * a failure silently, and on a phone a swallowed failure is indistinguishable
+ * from "the mod does nothing". `TestMode` records all of them in a bounded,
+ * reload-surviving log, echoes them into chat while test mode is on
+ * (`/aibot:debug on`), and runs the in-world check-up (`/aibot:test`).
+ *
+ * It is created before any subscription so that even a failing `subscribe()`
+ * has somewhere to be written.
+ */
+const testMode = new TestMode(controller);
+/** @type {any} */
+controller.test = testMode;
+/** Errors that must reach chat even with test mode off: they look like "dead mod". */
+const LOUD = { always: true };
+
+/**
+ * Subscribe once, and keep the *handler body* inside the harness too: an
+ * exception thrown by one event handler in Bedrock aborts the dispatch of that
+ * signal for every script in the world, which is how "tapping the bot does
+ * nothing" used to end up looking like a dead mod. `TestMode.guard` records the
+ * error and lets the next event through.
+ */
+function safeSubscribe(signal, callback, where = "event") {
+  return controller.test.guard(`subscribe ${where}`, () => {
+    signal?.subscribe((event) => {
+      controller.test.guard(`event ${where}`, () => callback(event), undefined, {
+        context: "thrown while handling a game event; the rest of the event still fires",
+        fix: `if this repeats on every ${where}, that interaction is broken — /aibot:debug log has the stack frame`
+      });
+    });
+    return Boolean(signal);
+  }, false, { level: "warn", fix: "this build does not expose that event; the pack falls back where it can" });
 }
 
 function reportFailure(player, context, error) {
   const text = String(error?.message || error).slice(0, 220);
   console.error(`[aibot] ${context}: ${error}`);
-  try { player?.sendMessage(`§c[AI Bot] ${context} failed:§r ${text}\n§eRun §f/aibot:info§e (or §f!aibot info§e) and check that the game version supports the pack.`); } catch { /* player left */ }
+  testMode.error(context, error, { ...LOUD, context: player ? `from ${player.name}` : "" });
+  try {
+    player?.sendMessage(`§c[AI Bot] ${context} failed:§r ${text}\n§eRun §f/aibot:debug log§e for the full error and §f/aibot:test§e for a check-up of every subsystem.`);
+  } catch { /* player left */ }
 }
 
 function isBotMention(message) {
@@ -35,22 +72,23 @@ function isBotMention(message) {
 function onChatMessage(player, message, cancelEvent) {
   if (!isCommandMessage(message) && !isBotMention(message)) return;
   if (cancelEvent) { try { cancelEvent(); } catch { /* after-events cannot be cancelled */ } }
+  testMode.note("chat", `"${String(message).slice(0, 90)}" from ${player?.name || "?"}`);
   system.run(() => handleChat(player, message, controller).catch((error) => reportFailure(player, "Command", error)));
 }
 
 const lastUiOpen = new Map();
 
 function openUiWithItem(player) {
-  let held = "";
-  try {
+  const held = testMode.guard("compass lookup", () => {
     // selectedSlotIndex is the stable @minecraft/server 2.9 property.
     const slot = player.selectedSlotIndex;
-    held = player.getComponent("minecraft:inventory")?.container?.getItem(slot)?.typeId || "";
-  } catch { held = ""; }
+    return player.getComponent("minecraft:inventory")?.container?.getItem(slot)?.typeId || "";
+  }, "");
   if (held !== "minecraft:compass") return;
   const now = Date.now();
   if (now - (lastUiOpen.get(player.id) || 0) < 1200) return;
   lastUiOpen.set(player.id, now);
+  testMode.note("compass", `menu opened by ${player?.name || "?"}`);
   system.run(() => {
     const task = controller.forPlayer(player)
       ? showControlPanel(player, controller)
@@ -60,10 +98,12 @@ function openUiWithItem(player) {
 }
 
 const itemUseSource = (() => {
-  const handler = (event) => { if (event.source?.typeId === "minecraft:player") openUiWithItem(event.source); };
-  if (safeSubscribe(world.afterEvents?.itemUse, handler)) return "afterEvents.itemUse";
-  if (safeSubscribe(world.beforeEvents?.itemUse, handler)) return "beforeEvents.itemUse";
-  return "none";
+  const handler = (event) => {
+    if (event.source?.typeId === "minecraft:player") openUiWithItem(event.source);
+  };
+  if (safeSubscribe(world.afterEvents?.itemUse, handler, "itemUse")) return "afterEvents.itemUse";
+  if (safeSubscribe(world.beforeEvents?.itemUse, handler, "itemUse (before)")) return "beforeEvents.itemUse";
+  return "none — holding and using a compass cannot open the menu on this build";
 })();
 
 // --- CHAT HANDLING: Robust single subscription with fallback ---
@@ -71,23 +111,29 @@ const itemUseSource = (() => {
 // If that signal is missing (older builds), we fall back to afterEvents.chatSend.
 // Binding both would double-execute commands, so we bind exactly one.
 // This is the most common "bot not working" cause: a missing signal that fails silently.
-const chatSource = (() => {
+const chatSource = testMode.guard("chat subscribe", () => {
   // chatSend is absent from stable 2.9. Reflective lookup keeps chat support on
   // hosts that explicitly add that signal without importing any beta module.
-  const beforeChat = Reflect.get(world.beforeEvents, "chatSend");
+  const beforeChat = Reflect.get(world.beforeEvents ?? {}, "chatSend");
   if (safeSubscribe(beforeChat, (event) => {
     onChatMessage(event.sender, String(event.message || ""), () => { event.cancel = true; });
-  })) return "beforeEvents.chatSend (host extension; commands hidden)";
-  const afterChat = Reflect.get(world.afterEvents, "chatSend");
+  }, "chatSend (before)")) return "beforeEvents.chatSend (host extension; commands hidden)";
+  const afterChat = Reflect.get(world.afterEvents ?? {}, "chatSend");
   if (safeSubscribe(afterChat, (event) => {
     onChatMessage(event.sender, String(event.message || ""), null);
-  })) return "afterEvents.chatSend (host extension; commands visible)";
+  }, "chatSend (after)")) return "afterEvents.chatSend (host extension; commands visible)";
   return "NONE — chat commands are unavailable on this game build";
-})();
+}, "NONE — reading the chat events threw an exception on this host") || "NONE — chat commands are unavailable on this game build";
 
 controller.diagnostics.chatSource = chatSource;
 controller.diagnostics.itemUseSource = itemUseSource;
 console.warn(`[aibot] script v${SCRIPT_VERSION} loaded; chat: ${chatSource}; compass menu: ${itemUseSource}`);
+if (chatSource.startsWith("NONE")) {
+  // A warn, not an error: on stable 2.x this is expected. It shows up in the
+  // log so `/aibot:debug log` and `/aibot:test` can explain "why does typing
+  // !aibot do nothing" instead of leaving the player to guess.
+  testMode.warn("chat events", "this build exposes no chatSend, so nothing typed in chat reaches the pack — /aibot:* commands and the compass menu are the interface", { fix: "not a bug: Mojang removed chat events from the stable Script API" });
+}
 
 // --- CUSTOM SLASH COMMANDS (/aibot:create) — the fix for "the command does nothing" ---
 // Stable @minecraft/server 2.x (Bedrock 26.x) has NO chat events at all:
@@ -117,7 +163,9 @@ const SLASH_COMMANDS = Object.freeze({
   protect: { description: "Make your AI bot defend you", arg: "bot name" },
   cancel: { description: "Cancel the AI bot's current task", arg: "bot name" },
   resume: { description: "Resume a paused AI bot task", arg: "bot name" },
-  remove: { description: "Despawn your AI bot", arg: "bot name" }
+  remove: { description: "Despawn your AI bot", arg: "bot name" },
+  debug: { description: "Test mode: on | off | log | clear | watch | status", arg: "sub-command" },
+  test: { description: "Run the full self-test; add 'net' to also ping the AI endpoint", arg: "net" }
 });
 
 let slashCommandsReady = false;
@@ -126,8 +174,17 @@ try {
   if (system.beforeEvents?.startup) {
     system.beforeEvents.startup.subscribe((event) => {
       const registry = event?.customCommandRegistry;
-      if (!registry) return;
+      if (!registry) {
+        testMode.error("slash commands", "the game fired the startup event without a customCommandRegistry", {
+          ...LOUD,
+          fix: "this build cannot host custom commands; use the compass menu or /scriptevent aibot:cmd …"
+        });
+        controller.diagnostics.slashCommands = "unavailable (no registry in the startup event)";
+        return;
+      }
       let registered = 0;
+      /** @type {string[]} */
+      const refused = [];
       for (const [action, spec] of Object.entries(SLASH_COMMANDS)) {
         const command = {
           name: `aibot:${action}`,
@@ -136,7 +193,7 @@ try {
           cheatsRequired: false
         };
         if ("arg" in spec && spec.arg) command.optionalParameters = [{ name: "name", type: CustomCommandParamType.String }];
-        try {
+        const outcome = testMode.guard(`register /aibot:${action}`, () => {
           registry.registerCommand(command, (origin, name) => {
             const player = origin?.sourceEntity;
             if (!player || player.typeId !== "minecraft:player") {
@@ -149,20 +206,25 @@ try {
             });
             return { status: CustomCommandStatus.Success };
           });
-          registered += 1;
-        } catch (error) {
-          console.warn(`[aibot] could not register /aibot:${action}: ${error}`);
-        }
+          return true;
+        }, false, { level: "error", always: true, fix: `the game rejected this command's schema — /aibot:${action} will not exist` });
+        if (outcome) registered += 1;
+        else refused.push(`aibot:${action}`);
       }
       slashCommandsReady = registered > 0;
       const total = Object.keys(SLASH_COMMANDS).length;
       controller.diagnostics.slashCommands = registered > 0
-        ? `${registered}/${total} registered (/aibot:create, /aibot:help, ...)`
+        ? `${registered}/${total} registered (/aibot:create, /aibot:help, /aibot:test, ...)`
         : "NOT registered";
+      if (refused.length) testMode.error("slash commands", `${refused.length}/${total} refused by the game: ${refused.join(", ")}`, LOUD);
+      else if (!registered) testMode.error("slash commands", "the game accepted none of the /aibot:* commands", LOUD);
       console.warn(`[aibot] custom slash commands: ${controller.diagnostics.slashCommands}`);
     });
+  } else {
+    testMode.warn("slash commands", "system.beforeEvents.startup does not exist on this build, so /aibot:* cannot be registered", { fix: "update Minecraft, or use the compass menu / /scriptevent aibot:cmd …" });
   }
 } catch (error) {
+  testMode.error("slash commands", error, { ...LOUD, fix: "startup subscription threw; /aibot:* commands cannot be registered on this build" });
   console.warn(`[aibot] startup event unavailable; /aibot:* slash commands cannot be registered: ${error}`);
 }
 
@@ -180,7 +242,7 @@ controller.diagnostics.scriptEvent = safeSubscribe(system.afterEvents?.scriptEve
   if (!action) return;
   const text = `!aibot ${[action, ...args].join(" ")}`.trim();
   system.run(() => handleChat(player, text, controller).catch((error) => reportFailure(player, "Scriptevent command", error)));
-}) ? "available (/scriptevent aibot:cmd <command> ...)" : "unavailable";
+}, "scriptEventReceive") ? "available (/scriptevent aibot:cmd <command> ...)" : "unavailable (needs a cheats-enabled world)";
 
 // --- DUPLICATE PACK DETECTION ---
 // Importing a newer .mcaddon does NOT remove an older copy whose manifest
@@ -258,11 +320,15 @@ export function __duplicateGuardForTests() {
 
 safeSubscribe(world.afterEvents?.entityDie, (event) => {
   if (event.deadEntity?.typeId === "aibot:companion") controller.handleDeath(event.deadEntity);
-});
+}, "entityDie");
 
 function autoRegisterCompanion(entity) {
   try {
     if (!entity || entity.typeId !== "aibot:companion") return;
+    // /aibot:test spawns a throwaway probe entity to prove the pack can spawn
+    // and see a bot. Adopting it would add a phantom bot to /aibot:list that
+    // the player then has to remove, so registration is paused while it lives.
+    if (controller.probe?.suppressAutoRegister) return;
     const hasOwner = entity.getDynamicProperty("aibot:owner_id");
     if (!hasOwner) {
       try {
@@ -281,24 +347,30 @@ function autoRegisterCompanion(entity) {
             entity.nameTag = String(entity.getDynamicProperty("aibot:name") || "AIBot");
           }
         }
-      } catch {}
+      } catch (error) {
+      // A companion that loads without owner metadata is a bot the player will
+      // never be able to command, so this is worth a line in the log.
+      testMode.warn("claim bot owner", error, { context: `entity ${entity.id}` });
+    }
     }
     controller.register(entity);
-    console.warn(`[aibot] auto-registered spawned entity ${entity.id}`);
-  } catch {}
+    testMode.note("register bot", `auto-registered ${entity.id} for ${entity.getDynamicProperty("aibot:owner_name") || "no owner"}`);
+  } catch (error) {
+    testMode.error("register bot", error, { context: `entity ${entity?.id ?? "?"} from ${entity?.dimension?.id ?? "?"}` });
+  }
 }
 
 safeSubscribe(world.afterEvents?.entitySpawn, (event) => {
   autoRegisterCompanion(event.entity);
-});
+}, "entitySpawn");
 safeSubscribe(world.afterEvents?.entityLoad, (event) => {
   autoRegisterCompanion(event.entity);
-});
+}, "entityLoad");
 
-safeSubscribe(world.afterEvents?.playerInteractWithEntity, (event) => {
+controller.diagnostics.interactSource = safeSubscribe(world.afterEvents?.playerInteractWithEntity, (event) => {
   if (event.target?.typeId !== "aibot:companion") return;
   system.run(() => showControlPanel(event.player, controller).catch((error) => reportFailure(event.player, "Control panel", error)));
-});
+}, "playerInteractWithEntity") ? "afterEvents.playerInteractWithEntity (tap a bot to open its panel)" : "unavailable — tapping the bot will not open a panel; use /aibot:panel";
 
 // --- AUTO SUMMON LIKE VERITY MOD ---
 // When a player creates a world, their initialSpawn fires once. Verity mod spawns a bot automatically
@@ -338,20 +410,22 @@ function tryAutoSummon(player, reason = "initial spawn") {
     const result = controller.create(player, chosenName);
     if (result?.created) {
       console.warn(`[aibot] auto-summoned ${chosenName} for ${player.name} (${reason})`);
-      try {
+      testMode.guard("auto-summon message", () => {
         player.sendMessage(`§a[AI Bot] Auto-summoned ${chosenName} for you! §rLike Verity mod, your bot appears when you create a world.`);
-        player.sendMessage(`§eUse §f${commandHint(controller, "help")}§e for commands, a §fcompass§e for the menu, or ${talkHint(controller, chosenName)}§e.`);
-      } catch {}
-      try { result.agent.follow(); } catch {}
+        player.sendMessage(`§eUse §f${commandHint(controller, "help")}§e for commands or a §fcompass§e for the menu. ${talkHint(controller, chosenName)}§e.`);
+      });
+      testMode.guard("auto-follow", () => result.agent.follow(), undefined, { context: `${chosenName} was created but is not following` });
       // Mark world as having auto-summoned at least once, so we don't spam on every reload
       // But we still allow per-player summon on initialSpawn even after this flag.
       if (reason === "worldLoadZeroBots") setWorldAutoSummonedFlag();
     } else if (result && !result.agent) {
       // A silent failure here is indistinguishable from "the whole mod is dead".
       console.warn(`[aibot] auto-summon failed for ${player.name}: ${result.reason}`);
-      try { player.sendMessage(`§c[AI Bot] Auto-summon failed:§r ${result.reason}`); } catch {}
+      testMode.error("auto-summon", result.reason, { ...LOUD, context: `for ${player.name} (${reason})` });
+      testMode.guard("auto-summon message", () => player.sendMessage(`§c[AI Bot] Auto-summon failed:§r ${result.reason}\n§e/aibot:test §eshows exactly what is broken; §f/aibot:debug log §eshows the errors.`));
     }
   } catch (error) {
+    testMode.error("auto-summon", error, { context: `for ${player?.name} (${reason})` });
     console.error(`[aibot] auto summon failed for ${player?.name}: ${error}`);
   }
 }
@@ -376,6 +450,17 @@ export function welcomeLines(chatOk, slashOk) {
   // once — the root cause of doubled messages and "No bot is assigned to you".
   // An old duplicate cannot be detected from script state, so say it here.
   lines.push(`§7Seeing two "[AI Bot …] Script loaded" banners? Two copies of this pack are active — deactivate the older AI Bot behavior pack in this world's settings.§r`);
+  // The one command that turns "it's not working" into a list of reasons, and
+  // the switch that makes every other error in the pack show up here live. It
+  // has to be spelled in the form THIS build can actually execute, same rule as
+  // every other command hint in the pack.
+  if (chatOk) {
+    lines.push(`§7Something not working? §f!aibot test §7checks every part of the pack and §f!aibot debug on §7prints every error into chat§r§8${slashOk ? " (§f/aibot:test §8also works)" : ""}§r`);
+  } else if (slashOk) {
+    lines.push(`§7Something not working? §f/aibot:test §7checks every part of the pack, and §f/aibot:debug on §7prints every error into this chat.§r`);
+  } else {
+    lines.push(`§7Something not working? Hold a §fcompass §7and use the menu — it has the check-up, the error log and the test-mode switch. §8(/scriptevent aibot:cmd test §8with cheats)§r`);
+  }
   return lines;
 }
 
@@ -384,56 +469,64 @@ safeSubscribe(world.afterEvents?.playerSpawn, (event) => {
   if (!event.initialSpawn) return;
   // Delay slightly to let restore complete and world load
   system.runTimeout(() => {
-    try {
+    // A player who left during the delay makes every line below throw; that is
+    // not a bug worth an error line, so the guard is quiet about it.
+    testMode.guard("welcome message", () => {
       const chatOk = !chatSource.startsWith("NONE");
       event.player.sendMessage(`§b[AI Bot v${SCRIPT_VERSION}]§r Script loaded (chat: ${chatOk ? "§aok§r" : "§cunavailable§r"}).`);
       for (const line of welcomeLines(chatOk, slashCommandsReady)) event.player.sendMessage(line);
+      // Errors captured before this player existed are useless unless they are
+      // shown somewhere, so the log greeting happens right after the welcome.
+      testMode.onPlayerJoin(event.player);
       // A second copy that was already running shows up here too, so the
       // explanation arrives with the join message instead of up to a minute later.
       sweepDuplicateInstances();
-    } catch { /* player despawned during the delay */ }
+    }, undefined, { level: "warn", context: "the joining player left before the welcome could be delivered" });
   }, 10);
 
   // Auto summon like Verity mod - delay a bit more to ensure restore finished
   system.runTimeout(() => {
-    try {
-      // Restore may not have finished yet on first ever world load, so call restore again if needed
-      if (controller.all().length === 0) {
-        try { controller.restore(); } catch {}
-      }
-      tryAutoSummon(event.player, "initialSpawn");
-    } catch {}
+    // Restore may not have finished yet on first ever world load, so call restore again if needed
+    if (controller.all().length === 0) testMode.guard("restore bots", () => controller.restore(), undefined, { context: "second attempt after the joining player spawned" });
+    tryAutoSummon(event.player, "initialSpawn");
   }, 60);
 });
 
 // Restore persisted bots on world load
 system.runTimeout(() => {
-  try {
+  testMode.guard("restore bots", () => {
     controller.restore();
     controller.diagnostics.engineStarted = true;
     console.warn(`[aibot] restored ${controller.all().length} bot(s)`);
+    if (controller.all().length) testMode.note("restore", `${controller.all().length} bot(s) restored: ${controller.names().join(", ")}`);
     // Verity-like world creation auto summon: if world has zero bots and at least one player online,
     // and we have never auto-summoned before in this world, spawn for the first player.
     // This only runs in real Bedrock (where world dynamic properties exist), not in Node tests.
     if (isRealBedrock() && controller.all().length === 0 && !hasWorldAutoSummonedFlag()) {
       system.runTimeout(() => {
-        try {
-          const players = world.getPlayers?.() || [];
-          if (players.length > 0) {
-            tryAutoSummon(players[0], "worldLoadZeroBots");
-          }
-        } catch {}
+        const players = world.getPlayers?.() || [];
+        if (players.length > 0) tryAutoSummon(players[0], "worldLoadZeroBots");
       }, 40);
     }
-  } catch (error) { console.error(`[aibot] restore failed: ${error}`); }
+  }, undefined, {
+    ...LOUD,
+    // A restore failure is the reason for "I made a bot yesterday and today the
+    // world says I have none", which players report as "the mod is broken".
+    context: "bots saved in this world could not be re-adopted; they will need re-creating"
+  });
 }, 1);
 
 controller.diagnostics.tickJob = Boolean(system.runInterval(() => {
-  try { controller.tick(); } catch (error) { console.error(`[aibot] tick failed: ${error}`); }
+  // The liveness beat is written BEFORE the work: if the AI loop is the thing
+  // that throws, "last beat 0 ticks ago" plus the error is the whole diagnosis.
+  testMode.beat("ai");
+  testMode.guard("bot tick", () => controller.tick(), undefined, {
+    context: `${controller.all().length} bot(s); one throwing agent no longer stops the others`
+  });
   // Heartbeat + duplicate sweep every ~15 s (this interval runs every 5 game
   // ticks and tickCount counts runs, so 60 runs = 300 ticks = 15 s); cheap,
   // and it catches a second copy being activated mid-session.
-  if (controller.tickCount % 60 === 0) { try { sweepDuplicateInstances(); } catch { /* never fatal */ } }
+  if (controller.tickCount % 60 === 0) testMode.guard("duplicate sweep", () => sweepDuplicateInstances(), undefined, { level: "warn" });
 }, 5));
 
 // Player-like movement: the AI loop above decides WHERE each bot goes (every
@@ -442,10 +535,20 @@ controller.diagnostics.tickJob = Boolean(system.runInterval(() => {
 // holding the movement keys. This is what makes the bot walk instead of
 // getting shoved by impulses.
 controller.diagnostics.movementJob = Boolean(system.runInterval(() => {
-  try { controller.stepMovement(); } catch (error) { console.error(`[aibot] movement step failed: ${error}`); }
+  testMode.beat("movement");
+  testMode.guard("movement step", () => controller.stepMovement(), undefined, {
+    // This one runs every tick, so the log folds repeats; the first occurrence
+    // still tells you the bot is being told where to go but cannot move.
+    context: "steering threw while moving bots"
+  });
 }, 1));
 
 globalThis.__aibotController = controller;
+
+/** Test-mode handle for the Node tests (mirrors __duplicateGuardForTests). */
+export function __testModeForTests() {
+  return testMode;
+}
 
 export function __resetForTests() {
   controller.agents.clear();

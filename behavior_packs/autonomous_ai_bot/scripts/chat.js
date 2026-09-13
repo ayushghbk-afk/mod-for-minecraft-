@@ -16,6 +16,9 @@ function help(player, controller) {
     "Talk to the bot by name — it takes tasks and chats back:",
     "  §fSteve, get me 32 oak logs§r · §fSteve, protect me§r · §fSteve, follow me§r",
     "  §fSteve, pick up items§r · §fSteve, eat§r · §fSteve, hi§r",
+    "§e/aibot:debug on§r — test mode: every error the pack catches is printed here, live",
+    "§e/aibot:debug log§r — the captured errors (§e/aibot:debug clear§r empties them)",
+    "§e/aibot:test§r — check-up of chat, commands, entity, model, movement, mining and persistence",
     "No chat on your build? Hold a §fcompass§r and use it — the menu needs no commands.",
     "Server commands stay disabled by default (§e!aibot allow on§r)."
   ];
@@ -26,11 +29,25 @@ function help(player, controller) {
   player.sendMessage(lines.join("\n"));
 }
 
+/**
+ * `!aibot debug <bot>` historically toggled the per-bot debug dump. Test mode
+ * owns the `debug` verb now, so the old spelling is still reachable as
+ * `!aibot debug bot on|off` when a caller wants only the bot's own dump.
+ */
+function legacyPerBotDebug(player, controller, args) {
+  if (args[0] !== "bot") return false;
+  const agent = controller.forPlayer(player);
+  if (!agent) { player.sendMessage("No bot is assigned to you."); return true; }
+  agent.updateConfig({ debug: args[1] !== "off" });
+  player.sendMessage(`Per-bot debug dump ${agent.config.debug ? "ON" : "OFF"} — state, target, plan and validation every 5 s.`);
+  return true;
+}
+
 function reportCreate(player, result, name) {
   if (result?.created || result?.reclaimed) return true;
   const reason = result?.reason || `${name} could not be created.`;
   player.sendMessage(`§c[AI Bot] ${reason}§r`);
-  if (!result?.agent) player.sendMessage("§eDiagnostics: §f/aibot:info§e (or §f!aibot info§e). If this message never appears, the script is not loading — re-import the .mcaddon and re-activate the behavior pack on this world.§r");
+  if (!result?.agent) player.sendMessage("§eRun §f/aibot:test§e — it checks the entity, the packs, the events and the tick loop, and prints what is broken. If this message never appears, the script is not loading: re-import the .mcaddon and re-activate the behavior pack on this world.§r");
   return false;
 }
 
@@ -51,6 +68,28 @@ export async function handleChat(player, message, controller) {
       case "diag":
       case "diagnostics":
       case "doctor": player.sendMessage(controller.infoText()); return true;
+      // --- TEST MODE: the switch that makes every hidden error visible ---
+      case "debug":
+      case "testmode": {
+        // The harness owns this verb; it degrades to the old per-bot dump when
+        // a host somehow has no test mode (SILENT_TEST.handle() returns false).
+        const handled = await controller.test.handle(player, command.args[0] || "status", command.args.slice(1), controller);
+        if (!handled) legacyPerBotDebug(player, controller, command.args);
+        return true;
+      }
+      case "test":
+      case "selftest":
+      case "self-test": {
+        const handled = await controller.test.handle(player, "test", command.args, controller);
+        if (!handled) player.sendMessage("§cTest mode is not loaded on this build, so the check-up is unavailable. §e/aibot:info §eshows what the script can see.");
+        return true;
+      }
+      case "errors":
+      case "errorlog": {
+        const handled = controller.test.handle(player, "log", command.args, controller);
+        if (!handled) player.sendMessage("§cNo error log is available on this build.");
+        return true;
+      }
       case "remove":
       case "despawn":
       case "delete": player.sendMessage(controller.removeByName(player, command.args.join(" "))); return true;
@@ -92,11 +131,6 @@ export async function handleChat(player, message, controller) {
         if (!agent || agent.ownerId !== player.id) { player.sendMessage("§cPermission denied."); return true; }
         agent.updateConfig({ commandsEnabled: command.args[0] === "on" });
         player.sendMessage(`Named commands are now ${agent.config.commandsEnabled ? "ON" : "OFF"}. Allowlist still applies.`);
-        return true;
-      }
-      case "debug": {
-        const agent = controller.forPlayer(player);
-        if (agent) { agent.updateConfig({ debug: command.args[0] === "on" }); player.sendMessage(`Debug mode ${agent.config.debug ? "ON" : "OFF"}.`); }
         return true;
       }
       case "command": player.sendMessage(controller.runNamedCommand(player, command.args[0], command.args.slice(1))); return true;

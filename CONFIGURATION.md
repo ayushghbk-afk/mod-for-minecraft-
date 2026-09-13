@@ -14,7 +14,7 @@ The control panel is available with the `/aibot:panel` slash command (or `!aibot
 | Personality | `friendly` | `friendly`, `focused`, `quiet`, `protective`; affects provider context only |
 | Combat mode | `defend_owner` | `passive`, `defend_owner`, `hostile_mobs`, `defend_self` |
 | Commands | `false` | Named allowlist is still enforced when enabled |
-| Debug | `false` | Reserved for expanded diagnostic output |
+| Debug | `false` | Per-bot diagnostic dump every 5 s (state, target, plan, validation). `/aibot:debug on` turns this **and** world-wide test mode on together; `!aibot debug bot on` is the per-bot-only form |
 | Owner only | `true` | Natural-language instructions are owner-gated |
 | Observation radius | `8` | Clamped to 4–12 blocks |
 | AI cooldown | `10000 ms` | Provider requests are throttled |
@@ -41,6 +41,20 @@ The default configuration is set to the supplied Cloudflare Worker without stori
   "maxPlanActions": 8
 }
 ```
+
+## Debug state that is not per-bot
+
+Test mode is a **world** setting, stored next to the per-bot config so it survives a reload
+and is readable before any player asks:
+
+| Key | Scope | Contents |
+|---|---|---|
+| `aibot:testmode` | world | `true` while `/aibot:debug on` is active (absent when off) |
+| `aibot:testlog` | world | bounded JSON array (≤30 entries, ≤20 KB): level, subsystem id, message with the stack frame, tick, age and `×N` repeat count. Info-level traces are deliberately not persisted. |
+| `aibot:hb:<instance>` | world | heartbeat of each running script copy, used by the duplicate-pack guard |
+
+Nothing else about diagnostics is configurable, and no key or token is ever stored: the
+provider round-trip in `/aibot:test net` reads the endpoint back out of the per-bot config.
 
 ## Performance controls
 

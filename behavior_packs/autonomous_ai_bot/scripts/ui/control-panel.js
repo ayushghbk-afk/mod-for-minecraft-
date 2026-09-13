@@ -15,11 +15,12 @@ export async function showControlPanel(player, controller) {
   }
   const form = new ActionFormData()
     .title(`AI BOT — ${agent.name}`)
-    .body(agent.statusText())
+    .body(`${agent.statusText()}\n\n§7Test mode: ${controller.test?.enabled ? "§aON§r§7 — errors are printed in chat" : "§coff§r§7 — use Diagnostics below if something is wrong"}§r`)
     .button("Tasks")
     .button("Inventory")
     .button("Settings")
     .button("Memory")
+    .button("Diagnostics & test mode")
     .button("Close");
   const response = await form.show(player);
   if (response.canceled) return;
@@ -27,6 +28,33 @@ export async function showControlPanel(player, controller) {
   if (response.selection === 1) return showInventory(player, agent);
   if (response.selection === 2) return showSettings(player, agent);
   if (response.selection === 3) return showMemory(player, agent);
+  if (response.selection === 4) return showDiagnostics(player, controller);
+}
+
+/**
+ * The panel is the only interface that works on every build with no chat, no
+ * commands and no cheats, so the debug tooling has to be reachable from here
+ * too — a player whose chat events are missing cannot type `/aibot:test`.
+ */
+async function showDiagnostics(player, controller) {
+  const test = controller.test;
+  const running = Boolean(test && test.enabled);
+  const form = new ActionFormData()
+    .title("Diagnostics")
+    .body(`§7Errors captured: §f${test?.errorCount?.() ?? 0}§7 · warnings §f${test?.warnCount?.() ?? 0}§r\n\n§7Test mode streams every error the pack catches into chat, so a silent failure becomes a line you can read on a phone.\n§7Test mode is ${running ? "§aON" : "§coff"}§r.`)
+    .button(running ? "Turn test mode OFF" : "Turn test mode ON")
+    .button("Run the full self-test")
+    .button("Show the error log")
+    .button("Clear the error log")
+    .button("Trace bot decisions for 60s")
+    .button("Back");
+  const response = await form.show(player);
+  if (response.canceled || response.selection === 5) return showControlPanel(player, controller);
+  if (response.selection === 0) { test?.setEnabled(!running, { origin: player }); return showControlPanel(player, controller); }
+  if (response.selection === 1) { await test?.runSelfTest(player, controller); return showControlPanel(player, controller); }
+  if (response.selection === 2) { test?.handle(player, "log", [], controller); return showControlPanel(player, controller); }
+  if (response.selection === 3) { test?.clear(); player.sendMessage("§aError log cleared."); return showControlPanel(player, controller); }
+  if (response.selection === 4) { test?.setWatch(60, player); return showControlPanel(player, controller); }
 }
 
 async function showTasks(player, agent) {
@@ -83,9 +111,17 @@ async function showSettings(player, agent) {
 }
 
 export async function showCreateBot(player, controller) {
-  const form = new ModalFormData().title("Create AI Bot").textField("Bot name", "Steve", { defaultValue: "Steve" }).toggle("Start following", { defaultValue: true });
+  const form = new ModalFormData()
+    .title("Create AI Bot")
+    .textField("Bot name", "Steve", { defaultValue: "Steve" })
+    .toggle("Start following", { defaultValue: true })
+    .toggle("Turn on test mode (shows every error in chat)", { defaultValue: Boolean(controller.test?.enabled) });
   const response = await form.show(player);
   if (response.canceled || !response.formValues) return;
+  // Checking this box is the "my bot is not working" path through the menu: the
+  // spawn result and any error behind it both arrive in chat.
+  if (response.formValues[2] !== undefined) controller.test?.setEnabled(response.formValues[2] === true, { announce: false, origin: player });
   const result = controller.create(player, String(response.formValues[0] || "Steve"));
   if (result?.agent && response.formValues[1]) result.agent.follow();
+  if (!result?.created && !result?.reclaimed) await controller.test?.runSelfTest(player, controller);
 }
