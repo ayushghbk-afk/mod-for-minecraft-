@@ -43,10 +43,25 @@ test("player intent parser understands the MVP instruction", () => {
   const intent = parseIntent("Steve, get me 32 oak logs.", ["Steve"]);
   assert.deepEqual(intent, { bot: "Steve", type: "collect", block: "minecraft:oak_log", count: 32, goal: "Collect 32 oak_log" });
   assert.deepEqual(parseBotCommand("!aibot create Alex"), { command: "create", args: ["Alex"] });
+  assert.equal(parseIntent("Steve, protect me", ["Steve"]).type, "protect");
+  assert.equal(parseIntent("Steve, pick up items", ["Steve"]).type, "pickup");
+  assert.equal(parseIntent("Steve, hi there", ["Steve"]).type, "chat");
+  assert.equal(parseIntent("Steve, use iron sword", ["Steve"]).type, "use_item");
 });
 
 test("config sanitisation never persists an API key", () => {
   const config = sanitiseConfig({ provider: "custom", apiKey: "secret", commandsEnabled: true });
   assert.equal("apiKey" in config, false);
   assert.equal(config.commandsEnabled, true);
+});
+
+test("pathfinder exports a bounded A* route helper", async () => {
+  const nav = await import("../behavior_packs/autonomous_ai_bot/scripts/core/navigation.js");
+  assert.equal(typeof nav.findLocalRoute, "function");
+  assert.equal(typeof nav.moveEntityTowards, "function");
+  assert.equal(typeof nav.setMoveAnim, "function");
+  // Empty/unsafe dimension still returns an array (never throws).
+  const fakeDim = { getBlock() { return { typeId: "minecraft:air" }; } };
+  const route = nav.findLocalRoute(fakeDim, { x: 0, y: 64, z: 0 }, { x: 3, y: 64, z: 0 }, { maxNodes: 40 });
+  assert.ok(Array.isArray(route));
 });

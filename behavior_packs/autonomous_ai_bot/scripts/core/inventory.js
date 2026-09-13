@@ -5,8 +5,29 @@ const DISPLAY_NAMES = Object.freeze({
   "minecraft:oak_log": "Oak Log", "minecraft:stone": "Stone", "minecraft:iron_ore": "Iron Ore",
   "minecraft:coal_ore": "Coal Ore", "minecraft:diamond": "Diamond", "minecraft:iron_ingot": "Iron Ingot",
   "minecraft:bread": "Bread", "minecraft:cooked_beef": "Steak", "minecraft:wooden_pickaxe": "Wooden Pickaxe",
-  "minecraft:stone_pickaxe": "Stone Pickaxe", "minecraft:iron_pickaxe": "Iron Pickaxe", "minecraft:iron_axe": "Iron Axe"
+  "minecraft:stone_pickaxe": "Stone Pickaxe", "minecraft:iron_pickaxe": "Iron Pickaxe", "minecraft:iron_axe": "Iron Axe",
+  "minecraft:apple": "Apple", "minecraft:golden_apple": "Golden Apple", "minecraft:cooked_porkchop": "Cooked Porkchop",
+  "minecraft:cooked_chicken": "Cooked Chicken", "minecraft:carrot": "Carrot", "minecraft:baked_potato": "Baked Potato",
+  "minecraft:torch": "Torch", "minecraft:iron_sword": "Iron Sword", "minecraft:diamond_sword": "Diamond Sword"
 });
+
+/** Foods the bot can eat like a player (restore via regeneration effect + consume). */
+export const FOOD_ITEMS = Object.freeze([
+  ["minecraft:golden_apple", 10, 1],
+  ["minecraft:cooked_beef", 8, 0],
+  ["minecraft:cooked_porkchop", 8, 0],
+  ["minecraft:cooked_mutton", 6, 0],
+  ["minecraft:cooked_chicken", 6, 0],
+  ["minecraft:bread", 5, 0],
+  ["minecraft:baked_potato", 5, 0],
+  ["minecraft:carrot", 3, 0],
+  ["minecraft:apple", 4, 0],
+  ["minecraft:potato", 1, 0],
+  ["minecraft:cookie", 2, 0],
+  ["minecraft:melon_slice", 2, 0]
+]);
+
+const FOOD_SET = new Set(FOOD_ITEMS.map(([id]) => id));
 
 function itemName(typeId) {
   return DISPLAY_NAMES[typeId] || String(typeId || "unknown").replace(/^minecraft:/, "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -50,7 +71,10 @@ export function readInventory(entity) {
     if (existing) existing.count += item.count;
     else compact.push({ id: item.id, name: item.name, count: item.count });
   }
-  return { slots, size: container.size, freeSlots: container.emptySlotsCount, totalItems, equipment, selectedItem: equipment.Mainhand || null, summary: compact.slice(0, 16) };
+  return {
+    slots, size: container.size, freeSlots: container.emptySlotsCount, totalItems, equipment,
+    selectedItem: equipment.Mainhand || null, summary: compact.slice(0, 16)
+  };
 }
 
 export function countItem(entity, typeId) {
@@ -73,6 +97,17 @@ export function consumeItem(entity, typeId, amount = 1) {
   const container = getContainer(entity);
   let left = Math.max(0, Number(amount) || 0);
   if (!container || left === 0) return { success: left === 0, consumed: 0 };
+  // Prefer mainhand first so "use item" feels player-like.
+  try {
+    const equipment = entity.getComponent("minecraft:equippable");
+    const main = equipment?.getEquipment(EquipmentSlot.Mainhand);
+    if (main && main.typeId === typeId) {
+      const take = Math.min(left, main.amount);
+      if (take === main.amount) equipment.setEquipment(EquipmentSlot.Mainhand, undefined);
+      else { main.amount -= take; equipment.setEquipment(EquipmentSlot.Mainhand, main); }
+      left -= take;
+    }
+  } catch { /* fall through to container */ }
   for (let slot = 0; slot < container.size && left > 0; slot += 1) {
     const item = container.getItem(slot);
     if (!item || item.typeId !== typeId) continue;
@@ -104,6 +139,77 @@ export function equipItem(entity, typeId) {
   return { success: false, reason: `No ${typeId} in inventory.` };
 }
 
+/**
+ * Use an item the way a player would: equip it, then apply its effect.
+ * Foods restore health via regeneration; torches place; tools stay equipped.
+ */
+export function useItem(entity, typeId, options = {}) {
+  const id = String(typeId || "");
+  if (!id) return { success: false, reason: "No item specified." };
+  if (countItem(entity, id) < 1) return { success: false, reason: `No ${id} in inventory.` };
+
+  const equipped = equipItem(entity, id);
+  // Food may already be in mainhand — equip failure is ok if we can still consume.
+  if (FOOD_SET.has(id)) {
+    const food = FOOD_ITEMS.find(([foodId]) => foodId === id);
+    const eaten = consumeItem(entity, id, 1);
+    if (!eaten.success) return { success: false, reason: "Could not consume food." };
+    try {
+      const amplifier = Number(food?.[2] ?? 0);
+      const heal = Number(food?.[1] ?? 4);
+      entity.addEffect("regeneration", 60 + (amplifier * 40), { amplifier, showParticles: true });
+      entity.addEffect("saturation", 10, { amplifier: 0, showParticles: false });
+      return { success: true, used: id, kind: "food", healed: heal };
+    } catch { /* effect optional */ }
+    return { success: true, used: id, kind: "food", healed: Number(food?.[1] ?? 4) };
+  }
+
+  if (id === "minecraft:torch" || id === "minecraft:soul_torch") {
+    const place = options.position || {
+      x: Math.floor(entity.location.x + (options.facing?.x || 0)),
+      y: Math.floor(entity.location.y),
+      z: Math.floor(entity.location.z + (options.facing?.z || 0))
+    };
+    try {
+      entity.dimension.runCommand(`setblock ${place.x} ${place.y} ${place.z} ${id} keep`);
+      consumeItem(entity, id, 1);
+      return { success: true, used: id, kind: "place", position: place };
+    } catch (error) {
+      return { success: false, reason: `Could not place torch: ${String(error).slice(0, 80)}` };
+    }
+  }
+
+  // Tools / weapons: equip is the use.
+  if (equipped.success || /sword|axe|pickaxe|shovel|hoe|bow|crossbow|trident|shield/.test(id)) {
+    if (!equipped.success) {
+      // Already in hand or equip rejected — still report success if held.
+      const held = readInventory(entity).selectedItem?.id;
+      if (held === id) return { success: true, used: id, kind: "equip" };
+      return equipped;
+    }
+    return { success: true, used: id, kind: "equip" };
+  }
+
+  return equipped.success
+    ? { success: true, used: id, kind: "equip" }
+    : { success: false, reason: equipped.reason || "Item cannot be used." };
+}
+
+/** Eat the best available food when health is low. */
+export function tryEatBestFood(entity) {
+  let health;
+  try { health = entity.getComponent("minecraft:health"); } catch { return { success: false, reason: "No health component." }; }
+  if (!health) return { success: false, reason: "No health component." };
+  if (health.currentValue >= health.effectiveMax * 0.85) return { success: false, reason: "Not hungry enough." };
+  for (const [id] of FOOD_ITEMS) {
+    if (countItem(entity, id) > 0) {
+      const result = useItem(entity, id);
+      if (result.success) return result;
+    }
+  }
+  return { success: false, reason: "No food in inventory." };
+}
+
 export function itemStackFromEntity(itemEntity) {
   try {
     const component = itemEntity.getComponent("minecraft:item");
@@ -112,4 +218,35 @@ export function itemStackFromEntity(itemEntity) {
   } catch { return null; }
 }
 
-export { itemName };
+/**
+ * Vacuum nearby dropped item entities into the bot inventory, like a player
+ * walking over them. Returns how many item stacks were fully taken.
+ */
+export function pickupNearbyItems(entity, maxDistance = 2.2, filterTypeId = null) {
+  const container = getContainer(entity);
+  if (!container) return { picked: 0, types: [] };
+  let picked = 0;
+  const types = [];
+  try {
+    const items = entity.dimension.getEntities({ location: entity.location, maxDistance, type: "minecraft:item" });
+    for (const itemEntity of items) {
+      const stack = itemStackFromEntity(itemEntity);
+      if (!stack) continue;
+      if (filterTypeId && stack.typeId !== filterTypeId) continue;
+      const added = addItem(entity, stack);
+      const accepted = stack.amount - (added.remaining?.amount || 0);
+      if (accepted > 0) {
+        picked += 1;
+        types.push(stack.typeId);
+        if (added.success) {
+          try { itemEntity.remove(); } catch { /* already gone */ }
+        } else if (added.remaining) {
+          try { itemEntity.getComponent("minecraft:item").itemStack = added.remaining; } catch { /* leave remainder */ }
+        }
+      }
+    }
+  } catch { /* entity query failed mid-tick */ }
+  return { picked, types };
+}
+
+export { itemName, FOOD_SET };

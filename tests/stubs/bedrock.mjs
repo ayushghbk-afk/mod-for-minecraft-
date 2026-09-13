@@ -93,10 +93,29 @@ export class Entity {
   addTag(tag) { this.tags.add(tag); return true; }
   removeTag(tag) { return this.tags.delete(tag); }
   getTags() { return [...this.tags]; }
-  teleport(location) { this.location = { ...location }; }
+  teleport(location, options = {}) {
+    if (location && typeof location === "object") this.location = { x: location.x, y: location.y, z: location.z };
+    if (options.rotation) this.rotation = { ...options.rotation };
+    if (options.facingLocation) {
+      const dx = options.facingLocation.x - this.location.x;
+      const dz = options.facingLocation.z - this.location.z;
+      this.rotation = { x: 0, y: Math.atan2(-dx, dz) * (180 / Math.PI) };
+    }
+  }
+  setRotation(value) { this.rotation = { ...value }; }
+  setProperty(name, value) { this.properties.set(`prop:${name}`, value); }
+  getProperty(name) { return this.properties.get(`prop:${name}`); }
+  getVelocity() { return this.velocity || { x: 0, y: 0, z: 0 }; }
   clearVelocity() { this.velocity = { x: 0, y: 0, z: 0 }; }
   applyImpulse(value) { this.velocity = { ...value }; this.location = { x: this.location.x + value.x, y: this.location.y + value.y, z: this.location.z + value.z }; }
-  applyDamage() { return true; }
+  applyDamage(amount = 1) {
+    const health = this.components.get("minecraft:health");
+    if (health) {
+      health.currentValue = Math.max(0, health.currentValue - Number(amount || 1));
+      if (health.currentValue <= 0) this.removed = true;
+    }
+    return true;
+  }
   addEffect() { return undefined; }
   remove() { this.removed = true; }
   kill() { this.removed = true; }

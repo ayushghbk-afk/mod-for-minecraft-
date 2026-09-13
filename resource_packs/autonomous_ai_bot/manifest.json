@@ -4,7 +4,7 @@
     "name": "Autonomous AI Bot - Resources",
     "description": "Player-like animated model, bot skin and status presentation for Autonomous AI Bot.",
     "uuid": "b6b2aa88-8c6e-4af7-a9b5-bf9b52a39d7a",
-    "version": [2, 0, 1],
+    "version": [2, 1, 0],
     "min_engine_version": [1, 26, 40]
   },
   "modules": [
@@ -12,7 +12,7 @@
       "description": "Autonomous AI Bot resources",
       "type": "resources",
       "uuid": "a1db6ab1-0e02-4375-8ff7-fdb1bba8f3e7",
-      "version": [2, 0, 1]
+      "version": [2, 1, 0]
     }
   ],
   "metadata": {

@@ -7,10 +7,24 @@
       "textures": { "default": "textures/entity/ai_bot" },
       "geometry": { "default": "geometry.aibot.player" },
       "animations": {
+        "idle": "animation.aibot.idle",
         "walk": "animation.aibot.walk",
-        "look": "animation.aibot.look"
+        "attack": "animation.aibot.attack",
+        "look": "animation.aibot.look",
+        "controller": "controller.animation.aibot.main"
       },
-      "scripts": { "animate": ["walk", "look"] },
+      "scripts": {
+        "initialize": [
+          "variable.aibot_move = 0.0;"
+        ],
+        "pre_animation": [
+          "variable.prop_move = query.property('aibot:move_speed');",
+          "variable.ground = query.modified_move_speed;",
+          "variable.speed = query.ground_speed;",
+          "variable.aibot_move = math.clamp(math.max(variable.prop_move, variable.ground * 4.0, variable.speed * 3.5), 0.0, 1.0);"
+        ],
+        "animate": ["controller"]
+      },
       "render_controllers": ["controller.render.aibot.player"],
       "enable_attachables": true,
       "spawn_egg": { "base_color": "#3b82f6", "overlay_color": "#dbeafe" }

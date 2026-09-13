@@ -4,7 +4,7 @@
     "name": "Autonomous AI Bot - Behavior",
     "description": "Stable Bedrock 26.40+ AI companion with local planning, physics navigation, memory, mining and combat.",
     "uuid": "8b4a4ecf-0f8b-4f4e-a5e6-9cb4a7e2e6f1",
-    "version": [2, 0, 1],
+    "version": [2, 1, 0],
     "min_engine_version": [1, 26, 40]
   },
   "modules": [
@@ -12,7 +12,7 @@
       "description": "Autonomous AI Bot data",
       "type": "data",
       "uuid": "3b4b6e8d-1e5a-4c6f-b3a1-9f4b3a6e8c22",
-      "version": [2, 0, 1]
+      "version": [2, 1, 0]
     },
     {
       "description": "Autonomous AI Bot stable Script API controller",
@@ -20,11 +20,11 @@
       "language": "javascript",
       "entry": "scripts/main.js",
       "uuid": "f50f7c14-9305-4c8b-9a9b-5c1f9b812d9a",
-      "version": [2, 0, 1]
+      "version": [2, 1, 0]
     }
   ],
   "dependencies": [
-    { "uuid": "b6b2aa88-8c6e-4af7-a9b5-bf9b52a39d7a", "version": [2, 0, 1] },
+    { "uuid": "b6b2aa88-8c6e-4af7-a9b5-bf9b52a39d7a", "version": [2, 1, 0] },
     { "module_name": "@minecraft/server", "version": "2.9.0" },
     { "module_name": "@minecraft/server-ui", "version": "2.1.0" }
   ],

@@ -1,7 +1,8 @@
 import { parseBotCommand, parseIntent } from "./core/intent-parser.js";
 import { showControlPanel, showCreateBot } from "./ui/control-panel.js";
 import { SCRIPT_VERSION } from "./core/version.js";
-import { chatAvailable, commandHint, talkHint, noBotMessage } from "./core/hints.js";
+import { chatAvailable, commandHint, noBotMessage } from "./core/hints.js";
+import { pickupNearbyItems } from "./core/inventory.js";
 
 function help(player, controller) {
   const lines = [
@@ -12,7 +13,9 @@ function help(player, controller) {
     "§e/aibot:panel§r §8(or §e!aibot panel§8§r) — status, tasks, inventory and settings",
     "§e/aibot:follow | stop | return | protect | cancel | resume§r",
     "§e/aibot:status | inventory | list | info§r, §e/aibot:remove <name>§r",
-    "Natural language also works in chat: §fSteve, get me 32 oak logs§r.",
+    "Talk to the bot by name — it takes tasks and chats back:",
+    "  §fSteve, get me 32 oak logs§r · §fSteve, protect me§r · §fSteve, follow me§r",
+    "  §fSteve, pick up items§r · §fSteve, eat§r · §fSteve, hi§r",
     "No chat on your build? Hold a §fcompass§r and use it — the menu needs no commands.",
     "Server commands stay disabled by default (§e!aibot allow on§r)."
   ];
@@ -97,6 +100,15 @@ export async function handleChat(player, message, controller) {
         return true;
       }
       case "command": player.sendMessage(controller.runNamedCommand(player, command.args[0], command.args.slice(1))); return true;
+      case "say":
+      case "tell":
+      case "chat": {
+        // !aibot say hello  — force a spoken reply from your bot
+        const agent = controller.forPlayer(player);
+        if (!agent) { player.sendMessage(noBotMessage(controller)); return true; }
+        await agent.chatWith(player, command.args.join(" ") || "hi");
+        return true;
+      }
       default:
         player.sendMessage(`§eUnknown AI Bot command "§f${command.command}§e".§r`);
         help(player, controller);
@@ -111,18 +123,51 @@ export async function handleChat(player, message, controller) {
     player.sendMessage("§cThat bot only accepts instructions from its owner.");
     return true;
   }
+
   switch (intent.type) {
     case "follow": agent.follow(); break;
     case "stop": agent.stop(); break;
-    case "return": agent.returnHome(); agent.notify("Coming back."); break;
+    case "return": agent.returnHome(); break;
     case "protect": agent.protect(); break;
     case "cancel": agent.cancel(); break;
     case "resume": agent.resume(); break;
     case "inventory": player.sendMessage(agent.inventoryText()); break;
     case "status": player.sendMessage(agent.statusText()); break;
-    case "collect": agent.createCollectTask(intent.block, intent.count, intent.goal); break;
-    case "build": player.sendMessage("§eBuilding is intentionally not auto-created from chat yet; use an explicit validated build plan."); break;
-    default: player.sendMessage(`Try "${agent.name}, follow me", "${agent.name}, get me 20 iron", or "${commandHint(controller, "panel")}".`);
+    case "collect":
+      agent.createCollectTask(intent.block, intent.count, intent.goal);
+      break;
+    case "pickup": {
+      // Immediate vacuum + short collect plan so chat "pick up items" works.
+      const result = pickupNearbyItems(agent.entity, 6);
+      if (result.picked > 0) agent.say(`Picked up ${result.picked} stack(s).`, player);
+      else {
+        agent.runtime.plan = {
+          goal: "Pick up nearby items",
+          thought: "Player asked to loot drops.",
+          actions: [{ type: "collect_item", count: 1 }]
+        };
+        agent.runtime.planIndex = 0;
+        agent.say("Looking for dropped items nearby.", player);
+      }
+      break;
+    }
+    case "eat": {
+      agent.engine.execute({ type: "eat_food" });
+      agent.say("Eating if I have food.", player);
+      break;
+    }
+    case "use_item": {
+      agent.useHeldItem(intent.item);
+      break;
+    }
+    case "build":
+      agent.say("Building from chat is not auto-created yet — use a validated build plan.", player);
+      break;
+    case "chat":
+      await agent.chatWith(player, intent.text || message);
+      break;
+    default:
+      await agent.chatWith(player, intent.text || message);
   }
   return true;
 }

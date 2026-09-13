@@ -146,3 +146,33 @@ test("the welcome message and auto-summon match a build where chat works", () =>
   assert.ok(globalThis.__aibotController.byName("AIBot"), "auto-summon must spawn the bot for real");
 });
 
+
+test("bot takes collect tasks from chat and replies out loud", () => {
+  main.__resetForTests();
+  const player = bedrock.addPlayer("Talker");
+  bedrock.command(player, "!aibot create Steve");
+  const replies = bedrock.command(player, "Steve, get me 8 oak logs");
+  assert.match(replies.join("\n"), /On it|oak_log|8/);
+  const agent = globalThis.__aibotController.byName("Steve");
+  assert.ok(agent);
+  assert.equal(agent.tasks.current?.kind, "collect");
+  assert.equal(agent.tasks.current?.target, 8);
+});
+
+test("bot chats back when mentioned with free-form text", () => {
+  main.__resetForTests();
+  const player = bedrock.addPlayer("Chatter");
+  bedrock.command(player, "!aibot create Bob");
+  const replies = bedrock.command(player, "Bob, hello there");
+  assert.match(replies.join("\n"), /Hey|hello|What do you need/i);
+});
+
+test("bot protect command arms defend mode via natural language", () => {
+  main.__resetForTests();
+  const player = bedrock.addPlayer("Guard");
+  bedrock.command(player, "!aibot create Rex");
+  const replies = bedrock.command(player, "Rex, protect me");
+  assert.match(replies.join("\n"), /Defend/i);
+  const agent = globalThis.__aibotController.byName("Rex");
+  assert.equal(agent.config.combatMode, "defend_owner");
+});
