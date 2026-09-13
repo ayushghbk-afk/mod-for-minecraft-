@@ -9,7 +9,7 @@ import { countItem, equipItem, pickupNearbyItems, readInventory, tryEatBestFood,
 import { BotState, readBotStatus, setBotStatus } from "./status.js";
 import { fallbackPlan, safeFallback } from "./planner.js";
 import { providerFor } from "./ai-provider.js";
-import { StuckDetector, setMoveAnim, clearRoute } from "./navigation.js";
+import { applyPlayerStep, clearRoute, isSafeCell, StuckDetector, stopEntity } from "./navigation.js";
 import { validateNamedCommand, canUseBot } from "./permissions.js";
 import { commandHint, talkHint, noBotMessage } from "./hints.js";
 
@@ -27,6 +27,41 @@ const DROP_FOR_BLOCK = Object.freeze({
 });
 
 function positionArray(position) { return [Math.round(position.x), Math.round(position.y), Math.round(position.z)]; }
+/**
+ * A bot embedded in solid blocks is effectively invisible — its model is
+ * swallowed by the terrain and players report it as "not in the world".
+ * Relocate the bot to the nearest standing-open cell (open feet + head,
+ * solid floor), searching a small spiral around its current position.
+ * Returns true when the bot was moved.
+ */
+function relocateToSafeCell(entity) {
+  const origin = {
+    x: Math.floor(entity.location.x),
+    y: Math.floor(entity.location.y),
+    z: Math.floor(entity.location.z)
+  };
+  for (let radius = 0; radius <= 4; radius += 1) {
+    const cells = [];
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      for (let dz = -radius; dz <= radius; dz += 1) {
+        if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
+        for (const dy of [0, 1]) cells.push({ x: origin.x + dx, y: origin.y + dy, z: origin.z + dz });
+      }
+    }
+    for (const cell of cells) {
+      try {
+        if (!isSafeCell(entity.dimension, cell)) continue;
+        if (cell.x === origin.x && cell.y === origin.y && cell.z === origin.z) continue;
+        entity.teleport(
+          { x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 },
+          { dimension: entity.dimension, keepVelocity: false }
+        );
+        return true;
+      } catch { /* try the next cell */ }
+    }
+  }
+  return false;
+}
 function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
 function isHostile(type) {
   return /zombie|husk|drowned|skeleton|stray|creeper|spider|cave_spider|witch|enderman|phantom|pillager|vindicator|ravager|slime|magma_cube|blaze|ghast|piglin|hoglin|warden|guardian|shulker|vex|evoker/.test(String(type || ""));
@@ -237,7 +272,7 @@ class BotAgent {
     this.runtime.follow = false;
     this.runtime.plan = null;
     this.runtime.combatTarget = null;
-    setMoveAnim(this.entity, 0);
+    stopEntity(this.entity);
     try {
       if (typeof this.entity.setProperty === "function") this.entity.setProperty("aibot:attacking", false);
     } catch { /* optional */ }
@@ -283,7 +318,7 @@ class BotAgent {
     this.runtime.plan = null;
     this.runtime.follow = false;
     this.runtime.combatTarget = null;
-    setMoveAnim(this.entity, 0);
+    stopEntity(this.entity);
     setBotStatus(this.entity, BotState.IDLE);
     this.memory.event("Current task cancelled.");
     this.say("Task cancelled.");
@@ -500,8 +535,8 @@ class BotAgent {
     if (this.runtime.follow && (!this.tasks.current || this.tasks.current.status !== TaskStatus.ACTIVE)) {
       this.engine.execute({ type: "follow_player" });
     } else if (!this.runtime.plan && !this.runtime.follow) {
-      // Idle — clear walk anim so legs stop.
-      if (tick % 10 === 0) setMoveAnim(this.entity, 0);
+      // Idle — release the movement keys so the bot eases to a player-like stop.
+      if (tick % 10 === 0) stopEntity(this.entity);
     }
 
     if (this.runtime.returningAfterTask && !this.runtime.plan) {
@@ -682,9 +717,19 @@ export class BotController {
       };
     }
     const dimension = player.dimension || world.getDimension(player.dimensionId ?? "overworld");
+    // Prefer cells the bot can actually stand in (open feet + head, solid
+    // floor). Spawning inside solid blocks is the classic "bot doesn't show
+    // up" report: the entity exists but is swallowed by the terrain.
+    const candidates = this.spawnLocation(player);
+    const openCandidates = candidates.filter((candidate) => {
+      try { return isSafeCell(dimension, candidate); } catch { return false; }
+    });
+    const ordered = openCandidates.length
+      ? [...openCandidates, ...candidates.filter((candidate) => !openCandidates.includes(candidate))]
+      : candidates;
     let entity = null;
     let lastError = "";
-    for (const candidate of this.spawnLocation(player)) {
+    for (const candidate of ordered) {
       try {
         const spawned = dimension.spawnEntity(BOT_ENTITY_ID, candidate);
         if (spawned) { entity = spawned; break; }
@@ -713,6 +758,12 @@ export class BotController {
     } catch (error) {
       return { agent: null, created: false, reason: `Bot spawned but metadata could not be written: ${String(error).slice(0, 140)}` };
     }
+    // If the bot still ended up inside solid blocks (the pocket around the
+    // player was built up), relocate it to the nearest standing-open cell so
+    // it is actually visible in the world.
+    try {
+      if (!isSafeCell(entity.dimension, entity.location)) relocateToSafeCell(entity);
+    } catch { /* best effort */ }
     const agent = this.register(entity);
     agent.name = name;
     agent.ownerId = player.id;
@@ -720,7 +771,9 @@ export class BotController {
     agent.runtime.home = player.location;
     setBotStatus(entity, BotState.IDLE);
     agent.persist(true);
-    player.sendMessage(`§a✔ Created ${name}§a.§r Use §e${commandHint(this, "panel")}§r, §e${commandHint(this, "follow")}§r, or ${talkHint(this, name)}.`);
+    const at = `${Math.round(entity.location.x)}, ${Math.round(entity.location.y)}, ${Math.round(entity.location.z)}`;
+    player.sendMessage(`§a✔ Created ${name}§a, standing at ${at}.§r Use §e${commandHint(this, "panel")}§r, §e${commandHint(this, "follow")}§r, or ${talkHint(this, name)}.`);
+    player.sendMessage(`§7If you see the name but no body — or nothing at all — the resource model is missing: open Edit World → Add-Ons, confirm "Autonomous AI Bot - Resources" is active, then reload the world. §r`);
     return { agent, created: true };
   }
   removeByName(player, requestedName = "") {
@@ -734,7 +787,15 @@ export class BotController {
   }
   infoText() {
     const d = this.diagnostics;
-    const bots = this.all().map((agent) => `  • ${agent.name} — ${readBotStatus(agent.entity).state}, owner ${agent.ownerName || "none"}, entity ${isValidEntity(agent.entity) ? "loaded" : "MISSING"}`).join("\n") || "  (none loaded)";
+    const bots = this.all().map((agent) => {
+      let position = "unknown";
+      try {
+        if (isValidEntity(agent.entity)) {
+          position = `${Math.round(agent.entity.location.x)}, ${Math.round(agent.entity.location.y)}, ${Math.round(agent.entity.location.z)}`;
+        }
+      } catch { /* entity unloading */ }
+      return `  • ${agent.name} — ${readBotStatus(agent.entity).state}, at ${position}, owner ${agent.ownerName || "none"}, entity ${isValidEntity(agent.entity) ? "loaded" : "MISSING"}`;
+    }).join("\n") || "  (none loaded)";
     let dimensions = "unknown";
     try { dimensions = DIMENSIONS.map((id) => `${id}:${world.getDimension(id).getEntities({ type: BOT_ENTITY_ID }).length}`).join(" "); } catch { /* dimension query unavailable */ }
     return [
@@ -748,13 +809,30 @@ export class BotController {
       `Tick loop: ${d.engineStarted ? "running" : "NOT RUNNING"}${d.tickJob ? "" : " (interval job missing)"}`,
       `Entities in world: ${dimensions}`,
       `Registered bots: ${this.all().length}`, bots,
-      `Spawn failures: ${d.spawnFailures}${d.lastSpawnError ? ` — last: ${d.lastSpawnError}` : ""}`
+      `Spawn failures: ${d.spawnFailures}${d.lastSpawnError ? ` — last: ${d.lastSpawnError}` : ""}`,
+      `§7Bot invisible?§r If a bot above is "loaded" you should at least see its name tag. ` +
+        `No body + no name → the entity did not spawn (check the "Entities in world" line). ` +
+        `Name but no body → the render model is missing: Edit World → Add-Ons → activate ` +
+        `"Autonomous AI Bot - Resources", then reload the world.`
     ].join("\n");
   }
   tick() {
     this.tickCount += 1;
     for (const [id, agent] of this.agents) {
       if (!agent.tick(this.tickCount)) this.agents.delete(id);
+    }
+  }
+  /**
+   * Player-like movement step, driven every game tick from main.js.
+   * The 5-tick AI loop above decides WHERE each bot goes; this steers the
+   * velocity every tick (accelerate, turn, jump on step-ups, ease to a stop)
+   * so the motion looks and feels like a real player instead of a series of
+   * impulses. Cheap: one velocity read + one write per bot per tick.
+   */
+  stepMovement() {
+    for (const agent of this.agents.values()) {
+      if (!isValidEntity(agent.entity)) continue;
+      try { applyPlayerStep(agent.entity); } catch { /* entity unloading */ }
     }
   }
   handleDeath(entity) {

@@ -24,7 +24,7 @@ The behavior pack contains:
 - Compact, throttled nearby block/entity perception with hostile-threat classification.
 - Persistent task manager and bounded memory in entity dynamic properties.
 - Deterministic action engine and validator. AI text never becomes a command or JavaScript.
-- Best-effort safe-step movement, follow-owner behavior and stuck detection with a finite recovery limit.
+- Player-like movement: the bot steers its velocity every game tick at player walk/sprint speed (constant horizontal velocity, preserved gravity, a single jump impulse per step-up, and a smooth eased stop) instead of taking raw impulses, plus follow-owner behavior and stuck detection with a finite recovery limit.
 - Verified destroy-mining, real item-entity pickup into the bot inventory, progress tracking and return-to-owner behavior.
 - Hostile mob defense, task pause, attack, threat verification and task resume.
 - Owner-gated natural-language intents and a Bedrock-friendly control panel.

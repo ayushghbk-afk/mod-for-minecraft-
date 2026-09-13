@@ -4,4 +4,4 @@
  * create a circular import that the Bedrock module loader can resolve as
  * `undefined` during first evaluation.
  */
-export const SCRIPT_VERSION = "2.1.0";
+export const SCRIPT_VERSION = "2.2.0";

@@ -57,3 +57,61 @@ Fix:
 - `tests/compatibility.test.mjs` asserts the same bound plus the identifier and `is_summonable`.
 - The spawn-failure message no longer blames an inactive pack when the scripts are demonstrably running.
 - Pack/script version bumped to 2.0.1 so the fixed copy is distinguishable in the join banner.
+
+## v2.2.0 — invisible bot + player-like movement
+
+Two field reports addressed at once: *"bot is invisible / not showing in the
+world"* and *"movement does not feel like a player"*.
+
+### Invisible / not showing in the world
+
+The entity now spawns **visible** and the render chain is audited in CI:
+
+- **Spawn into open space only.** `create()` now filters its spawn candidates
+  with `isSafeCell` (open feet + head, solid floor) and, if the bot still ends
+  up inside solid blocks, `relocateToSafeCell()` teleports it to the nearest
+  standing-open cell (spiral search, radius 4). A bot embedded in terrain is
+  the classic "bot not in the world" report — the entity exists but is
+  swallowed by the blocks.
+- **Geometry hardened.** Every bone in `aibot.player.geo.json` now carries an
+  explicit `pivot` **and** `rotation`. A missing bone rotation is a documented
+  cause of "entity exists but does not render".
+- **Client-entity Molang fixed.** The `pre_animation` script called
+  `math.max(a, b, c)` with three arguments; Molang `math.max` takes exactly
+  two. An invalid expression in the client entity scripts risks Bedrock
+  dropping the whole client entity — the bot then exists but renders nothing.
+  The call is now nested two-argument `math.max`.
+- **Animation controller hardened.** Boolean property transitions now use the
+  classic `query.property('aibot:attacking') == 1.0 / == 0.0` numeric form.
+- **Owners get an answer.** `/aibot:create` now reports the bot's exact
+  coordinates plus an explicit "if you see the name but no body, activate
+  Autonomous AI Bot - Resources" tip; `/aibot:info` lists each bot's position
+  and explains the name-only vs. nothing-at-all distinction.
+- **New CI guard.** `tests/compatibility.test.mjs` audits the full render
+  chain (texture file on disk, geometry identifier + per-bone pivot/rotation,
+  every animation/controller/render-controller reference resolves, controller
+  states only play defined animations, no 3-argument `math.max` anywhere in
+  the resource pack) so an invisible-bot regression fails the build.
+
+### Player-like movement
+
+The old movement applied `applyImpulse` every action tick (5 game ticks):
+velocity accumulated past player speed and the constant upward component made
+the bot hop every half second. Movement is now continuous velocity control,
+like a player holding the movement keys:
+
+- `moveEntityTowards()` only refreshes a per-entity **steering state**
+  (direction, constant speed, step-up flag); it no longer injects impulses.
+- New `applyPlayerStep()` runs **every game tick** (1-tick `stepMovement()`
+  job in `main.js`): horizontal velocity lerps toward the travel direction
+  (natural acceleration/turning), the vertical velocity is preserved (real
+  gravity — no hopping), and a jump impulse of 0.42 blocks/tick (vanilla
+  player jump) is applied only for a genuine step-up while grounded.
+- Speeds match a player: walk 0.215 blocks/tick (≈4.3 m/s), sprint 0.279
+  (≈5.6 m/s, used for follow/return/approach).
+- `stopEntity()` replaces instant `clearVelocity()`: the bot decelerates
+  (0.6× per tick) like a player releasing the keys. Steering states expire
+  after 1.5 s without a refresh, so a bot whose AI stops issuing movement
+  eases to a stop instead of drifting.
+- Pack/script version bumped to 2.2.0 so the fixed build is distinguishable
+  in the join banner.

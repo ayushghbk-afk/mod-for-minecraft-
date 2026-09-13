@@ -106,7 +106,10 @@ export class Entity {
   setProperty(name, value) { this.properties.set(`prop:${name}`, value); }
   getProperty(name) { return this.properties.get(`prop:${name}`); }
   getVelocity() { return this.velocity || { x: 0, y: 0, z: 0 }; }
+  setVelocity(value) { this.velocity = { x: value.x, y: value.y, z: value.z }; }
   clearVelocity() { this.velocity = { x: 0, y: 0, z: 0 }; }
+  /** The test world has no collision simulation; the bot is treated as grounded. */
+  get isOnGround() { return this.grounded !== false; }
   applyImpulse(value) { this.velocity = { ...value }; this.location = { x: this.location.x + value.x, y: this.location.y + value.y, z: this.location.z + value.z }; }
   applyDamage(amount = 1) {
     const health = this.components.get("minecraft:health");

@@ -7,7 +7,7 @@
         "idle": {
           "animations": ["idle", "look"],
           "transitions": [
-            { "attack": "query.property('aibot:attacking') == 1.0 || query.property('aibot:attacking') == true" },
+            { "attack": "query.property('aibot:attacking') == 1.0" },
             { "walk": "variable.aibot_move > 0.08 || query.modified_move_speed > 0.05 || query.ground_speed > 0.05" }
           ],
           "blend_transition": 0.15
@@ -15,7 +15,7 @@
         "walk": {
           "animations": ["walk", "look"],
           "transitions": [
-            { "attack": "query.property('aibot:attacking') == 1.0 || query.property('aibot:attacking') == true" },
+            { "attack": "query.property('aibot:attacking') == 1.0" },
             { "idle": "variable.aibot_move <= 0.08 && query.modified_move_speed <= 0.05 && query.ground_speed <= 0.05" }
           ],
           "blend_transition": 0.12
@@ -23,8 +23,8 @@
         "attack": {
           "animations": ["attack", "look", { "walk": "variable.aibot_move > 0.08" }],
           "transitions": [
-            { "walk": "(query.property('aibot:attacking') == 0.0 || query.property('aibot:attacking') == false) && (variable.aibot_move > 0.08 || query.modified_move_speed > 0.05)" },
-            { "idle": "query.property('aibot:attacking') == 0.0 || query.property('aibot:attacking') == false" }
+            { "walk": "query.property('aibot:attacking') == 0.0 && (variable.aibot_move > 0.08 || query.modified_move_speed > 0.05)" },
+            { "idle": "query.property('aibot:attacking') == 0.0" }
           ],
           "blend_transition": 0.08
         }

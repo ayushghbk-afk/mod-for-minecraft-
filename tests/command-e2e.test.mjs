@@ -29,8 +29,10 @@ test("!aibot create Steve spawns an owner-bound bot and confirms in chat", () =>
   bedrock.advance(20);
 
   const replies = bedrock.command(player, "!aibot create Steve");
-  assert.equal(replies.length, 1, `expected exactly one reply, got: ${JSON.stringify(replies)}`);
+  assert.equal(replies.length, 2, `expected confirmation + visibility tip, got: ${JSON.stringify(replies)}`);
   assert.match(replies[0], /Created Steve/);
+  assert.match(replies[0], /standing at/, "the owner should be told where the bot is standing");
+  assert.match(replies[1], /Resources/, "invisible-bot tip must point at the resource pack");
 
   const bots = bedrock.world.getDimension("overworld").getEntities({ type: "aibot:companion" });
   assert.equal(bots.length, 1, "the companion entity must actually exist in the dimension");
@@ -45,7 +47,7 @@ test("!aibot create Steve spawns an owner-bound bot and confirms in chat", () =>
 test("the same chat message never creates two bots", () => {
   const player = bedrock.addPlayer("Dup");
   const replies = bedrock.command(player, "!aibot create Dupbot");
-  assert.equal(replies.length, 1);
+  assert.equal(replies.length, 2, "confirmation + visibility tip");
   const second = bedrock.command(player, "!aibot create Dupbot");
   // Re-running create with your own existing bot hands it back instead of
   // scolding the player with "already exists" — that message is what made
@@ -175,4 +177,37 @@ test("bot protect command arms defend mode via natural language", () => {
   assert.match(replies.join("\n"), /Defend/i);
   const agent = globalThis.__aibotController.byName("Rex");
   assert.equal(agent.config.combatMode, "defend_owner");
+});
+
+test("a bot that spawns inside solid blocks is relocated to a standing-open cell", () => {
+  main.__resetForTests();
+  const dimension = bedrock.world.getDimension("overworld");
+  // The default stub player stands at (12, 70, -4). Fill every fixed spawn
+  // candidate (feet + head) with stone so the bot's first spawn is buried —
+  // the classic "bot not showing in world" setup.
+  for (const cell of [
+    { x: 13, y: 70, z: -3 }, { x: 11, y: 70, z: -5 }, { x: 13, y: 70, z: -5 },
+    { x: 11, y: 70, z: -3 }, { x: 12, y: 70, z: -4 }, { x: 12, y: 71, z: -4 }
+  ]) {
+    for (const dy of [0, 1]) dimension.getBlock({ x: cell.x, y: cell.y + dy, z: cell.z }).typeId = "minecraft:stone";
+  }
+  // Leave exactly one standing-open cell within the relocation spiral:
+  // (15, 70, -4) with a solid floor at (15, 69, -4).
+  dimension.getBlock({ x: 15, y: 69, z: -4 }).typeId = "minecraft:stone";
+
+  const player = bedrock.addPlayer("Buried");
+  const replies = bedrock.command(player, "!aibot create BuriedBot");
+  assert.match(replies[0], /Created BuriedBot/);
+
+  const bots = dimension.getEntities({ type: "aibot:companion" });
+  assert.equal(bots.length, 1);
+  const bot = bots[0];
+  // The bot must NOT be left buried in the stone pocket it spawned into.
+  const feet = dimension.getBlock(bot.location);
+  assert.notEqual(feet.typeId, "minecraft:stone", "bot is stuck inside a solid block — invisible to the player");
+  assert.equal(feet.isAir?.() ?? feet.typeId === "minecraft:air", true, "bot feet must be in an open cell");
+  // ...and relocated to the one safe cell the spiral could find.
+  assert.equal(Math.round(bot.location.x * 2) / 2, 15.5);
+  assert.equal(Math.round(bot.location.z * 2) / 2, -3.5);
+  assert.equal(Math.round(bot.location.y), 70);
 });
