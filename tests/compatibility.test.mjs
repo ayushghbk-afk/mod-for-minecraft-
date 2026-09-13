@@ -12,6 +12,19 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 const bedrock = await import("#stub/bedrock");
 const { findLocalRoute, moveEntityTowards, applyPlayerStep, stopEntity, isSafeCell } = await import("../behavior_packs/autonomous_ai_bot/scripts/core/navigation.js");
 const { makeObservation } = await import("../behavior_packs/autonomous_ai_bot/scripts/core/observation.js");
+const { useItem, countItem, readInventory } = await import("../behavior_packs/autonomous_ai_bot/scripts/core/inventory.js");
+const { ActionEngine } = await import("../behavior_packs/autonomous_ai_bot/scripts/core/action-engine.js");
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A 2-high wall that spans the whole A* search radius: unclimbable (step-up is 1)
+ * and no detour fits inside maxRadius, so the target on the far side is unreachable. */
+function buildUnreachableWall(dimension, x = 2, halfSpan = 34) {
+  for (let z = -halfSpan; z <= halfSpan; z += 1) {
+    dimension.getBlock({ x, y: 64, z }).typeId = "minecraft:stone";
+    dimension.getBlock({ x, y: 65, z }).typeId = "minecraft:stone";
+  }
+}
 
 function flatWorld(dimension, radius = 12) {
   for (let x = -radius; x <= radius; x += 1) for (let z = -radius; z <= radius; z += 1) {
@@ -101,6 +114,93 @@ test("movement is player-like: constant walk speed, no hopping, smooth stop, ste
   moveEntityTowards(climber, { x: 4.5, y: 64, z: 0.5 }, { speed: 0.215, stopDistance: 1.8 });
   assert.ok(climber.getVelocity().y >= 0.4, `step-up must jump like a player (vy=${climber.getVelocity().y})`);
   assert.ok(climber.getVelocity().y <= 0.42, "jump impulse must not exceed the player jump speed");
+});
+
+test("unreachable target: the bot stops, never teleports in place, and recovers when a path opens", async () => {
+  const dimension = new bedrock.Dimension("test");
+  flatWorld(dimension, 34);
+  buildUnreachableWall(dimension);
+  let blockReads = 0;
+  const originalGetBlock = dimension.getBlock.bind(dimension);
+  dimension.getBlock = (location) => { blockReads += 1; return originalGetBlock(location); };
+
+  const entity = new bedrock.Entity("aibot:companion", { x: 0.5, y: 64, z: 0.5 }, dimension);
+  let teleports = 0;
+  entity.teleport = () => { teleports += 1; };
+  const target = { x: 5.5, y: 64, z: 0.5 };
+
+  // First call: one full A* runs and concludes "no route".
+  const first = moveEntityTowards(entity, target);
+  assert.equal(first.success, false, "an unreachable target must fail, not pretend to be moving");
+  assert.equal(first.unreachable, true);
+  assert.match(first.reason, /walkable path/);
+  const readsAfterFirst = blockReads;
+  assert.ok(readsAfterFirst > 100, "the initial search should actually scan the world");
+
+  // Repeated planning calls (the 5-tick cadence) must NOT re-run the full
+  // search. The old code re-planned on every call and then made the bot
+  // teleport between neighbouring cells every ~7 s while the target stayed
+  // unreachable — the "bot glitches around in place" report.
+  for (let i = 0; i < 8; i += 1) moveEntityTowards(entity, target);
+  assert.ok(blockReads - readsAfterFirst < readsAfterFirst / 2, "re-planning an unreachable target must be throttled");
+  assert.equal(teleports, 0, "an unreachable target must never make the bot teleport in place");
+
+  // The bot eases to rest at the obstacle instead of shoving into it.
+  for (let i = 0; i < 30; i += 1) applyPlayerStep(entity);
+  assert.ok(Math.hypot(entity.getVelocity().x, entity.getVelocity().z) < 0.01, "the bot must come to rest at the obstacle");
+
+  // Open a gap in the wall: the bot must resume within the re-check window.
+  dimension.getBlock({ x: 2, y: 64, z: 0 }).typeId = "minecraft:air";
+  dimension.getBlock({ x: 2, y: 65, z: 0 }).typeId = "minecraft:air";
+  await sleep(1600);
+  const after = moveEntityTowards(entity, target);
+  assert.equal(after.success, true, "the bot must resume moving once a walkable path exists");
+  assert.ok(Math.hypot(entity.getVelocity().x, entity.getVelocity().z) > 0, "the bot must actually be walking again");
+  assert.equal(teleports, 0);
+});
+
+test("collect_item fails fast instead of pending forever when the drop is unreachable", () => {
+  const dimension = new bedrock.Dimension("test");
+  flatWorld(dimension, 34);
+  buildUnreachableWall(dimension);
+  const entity = new bedrock.Entity("aibot:companion", { x: 0.5, y: 64, z: 0.5 }, dimension);
+  dimension.spawnItem(new bedrock.ItemStack("minecraft:oak_log", 1), { x: 4.5, y: 64, z: 0.5 });
+  const agent = {
+    entity,
+    tasks: { current: { block: "minecraft:oak_log" }, addAction() {} },
+    runtime: { lastMinedAt: 0 },
+    currentCollectionItem: () => "minecraft:oak_log",
+    entityInventoryIsFull: () => false
+  };
+  const engine = new ActionEngine(agent);
+  const result = engine.execute({ type: "collect_item" });
+  assert.equal(result.success, false);
+  assert.equal(result.pending, undefined, "an unreachable drop must fail the action, not pend forever");
+  assert.match(result.reason, /walkable path/);
+});
+
+test("eating food only applies valid Bedrock effects (no Java-only 'saturation')", () => {
+  const dimension = new bedrock.Dimension("test");
+  const bot = new bedrock.Entity("aibot:companion", { x: 0, y: 64, z: 0 }, dimension);
+  // Bedrock rejects unknown effect ids — mimic that so a regression to the
+  // invalid "saturation" call cannot hide inside the "effect optional" catch.
+  const applied = [];
+  bot.addEffect = (id) => {
+    if (id === "saturation") throw new Error("Cannot add effect with unknown type: saturation");
+    applied.push(id);
+  };
+  bot.getComponent("minecraft:inventory").container.setItem(0, new bedrock.ItemStack("minecraft:bread", 3));
+  const result = useItem(bot, "minecraft:bread");
+  assert.equal(result.success, true, "eating must succeed");
+  assert.deepEqual(applied, ["regeneration"], "only valid Bedrock effects may be applied when eating");
+  const held = readInventory(bot).selectedItem;
+  assert.equal(held?.id, "minecraft:bread");
+  assert.equal(held?.count, 2);
+  // Pin the removal statically too: "saturation" is a Java-only effect and
+  // threw on every meal.
+  const source = readFileSync("behavior_packs/autonomous_ai_bot/scripts/core/inventory.js", "utf8");
+  assert.doesNotMatch(source, /addEffect\(\s*["']saturation["']/, "Bedrock has no 'saturation' effect");
+  assert.equal(countItem(bot, "minecraft:bread"), 0, "the eaten bread moved to the main hand, not a duplicate");
 });
 
 test("spawning only into standing-open cells keeps the bot visible in the world", () => {

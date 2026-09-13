@@ -227,8 +227,12 @@ export class ActionEngine {
         if (d < nearestDist) { nearest = itemEntity; nearestDist = d; }
       }
       if (nearest && nearestDist > 1.6) {
-        moveEntityTowards(this.bot, nearest.location, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 1.2 });
+        const move = moveEntityTowards(this.bot, nearest.location, { speed: MOVEMENT_SPEEDS.walk, stopDistance: 1.2 });
         setBotStatus(this.bot, BotState.COLLECTING, { target: wanted, distance: nearestDist });
+        // No walkable path to the drop: fail the action so the plan can retry
+        // or give up — returning pending here used to hang the task in
+        // COLLECTING forever on an unreachable drop.
+        if (!move.success) return this.result(action, false, move.reason || "Dropped item is out of reach.", { distance: nearestDist });
         return this.result(action, false, "Moving to dropped item.", { pending: true });
       }
       // Drop is close enough to vacuum — release movement keys (like a player
@@ -364,13 +368,15 @@ export class ActionEngine {
         if (hit) {
           this.agent.runtime.lastAttackAt = now;
           setAttackingFlag(this.bot, true);
-          // Brief knockback-feel: face the target.
+          // Face the target with a rotation only. The old "same-location
+          // teleport" re-synced the whole entity every swing, which shows up
+          // as a hitch on mobile.
           try {
-            this.bot.teleport(this.bot.location, {
-              dimension: this.bot.dimension,
-              facingLocation: target.location,
-              keepVelocity: true
-            });
+            const dx = target.location.x - this.bot.location.x;
+            const dz = target.location.z - this.bot.location.z;
+            if (Math.hypot(dx, dz) > 0.01 && typeof this.bot.setRotation === "function") {
+              this.bot.setRotation({ x: 0, y: Math.atan2(-dx, dz) * (180 / Math.PI) });
+            }
           } catch { /* optional */ }
         }
       } else {

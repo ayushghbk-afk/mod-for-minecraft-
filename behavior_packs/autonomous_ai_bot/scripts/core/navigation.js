@@ -152,6 +152,7 @@ export function findLocalRoute(dimension, start, target, options = {}) {
   const costs = new Map([[key(origin), 0]]);
   let best = origin;
   let bestScore = heuristic(origin, goalCell);
+  let reached = false;
 
   for (let visited = 0; open.length && visited < maxNodes; visited += 1) {
     const current = pop();
@@ -159,6 +160,7 @@ export function findLocalRoute(dimension, start, target, options = {}) {
     if (h < bestScore) { best = current; bestScore = h; }
     if (Math.hypot(current.x - goalCell.x, current.z - goalCell.z) <= 1.05 && Math.abs(current.y - goalCell.y) <= 1) {
       best = current;
+      reached = true;
       break;
     }
     for (const next of neighbours(dimension, current)) {
@@ -175,6 +177,19 @@ export function findLocalRoute(dimension, start, target, options = {}) {
   }
 
   if (key(best) === key(origin)) return [];
+  if (!reached) {
+    // Distinguish "the goal is far away" from "the goal is blocked":
+    //  • goal OUTSIDE the search region → a partial route toward the best
+    //    cell is the intended long-range follow behaviour (re-plan as the bot
+    //    closes the distance);
+    //  • goal INSIDE the search region but not reached → no route exists.
+    //    Returning a partial route used to send the bot to the cell in front
+    //    of the wall, where it shoved, "got stuck", and the recovery loop
+    //    teleported it around its own feet.
+    const goalInRegion = Math.hypot(goalCell.x - origin.x, goalCell.z - origin.z) <= maxRadius
+      && Math.abs(goalCell.y - origin.y) <= 12;
+    if (goalInRegion) return [];
+  }
   const path = [];
   for (let cursor = best; key(cursor) !== key(origin) && path.length < 48;) {
     path.unshift({ x: cursor.x + 0.5, y: cursor.y, z: cursor.z + 0.5 });
@@ -187,15 +202,32 @@ export function findLocalRoute(dimension, start, target, options = {}) {
 function routeState(entity, target, options = {}) {
   const targetKey = key(target);
   let state = routes.get(entity.id);
-  const stale = !state || state.targetKey !== targetKey || state.route.length === 0 || Date.now() - state.plannedAt > 2200;
+  // An empty route is NOT automatically stale — it means one of two things:
+  //   • the bot walked through every waypoint (route consumed; the target is
+  //     still far away but reachable) → re-route promptly, or
+  //   • A* found no route at all (target unreachable) → re-check at a calm
+  //     1.5 s cadence, or immediately when the target moved, so the bot
+  //     resumes the moment a path opens without re-running the full search on
+  //     every planning call (that storm was the old bug: a full A* every
+  //     5-tick while following at range, plus a second full search every
+  //     3.5 s from the stuck recovery).
+  const targetMoved = !state?.lastTarget || distance(state.lastTarget, target) > 2;
+  const stale =
+    !state ||
+    state.targetKey !== targetKey ||
+    (!state.noRoute && state.route.length === 0) ||
+    (state.noRoute ? targetMoved || Date.now() - state.plannedAt > 1500 : Date.now() - state.plannedAt > 2200);
   if (stale) {
+    const route = findLocalRoute(entity.dimension, entity.location, target, options);
     state = {
       targetKey,
-      route: findLocalRoute(entity.dimension, entity.location, target, options),
+      route,
+      noRoute: route.length === 0,
+      lastTarget: { x: target.x, y: target.y, z: target.z },
       plannedAt: Date.now(),
       failures: state?.failures || 0,
-      last: { ...entity.location },
-      lastProgressAt: Date.now()
+      last: state?.last || { ...entity.location },
+      lastProgressAt: state?.lastProgressAt || Date.now()
     };
     routes.set(entity.id, state);
   }
@@ -213,8 +245,13 @@ function recover(entity, target, state) {
   state.failures += 1;
   state.route = findLocalRoute(entity.dimension, entity.location, target, { maxNodes: 560, maxRadius: 32 });
   state.plannedAt = Date.now();
-  if (state.route.length || state.failures < 2) return false;
-  // Teleport is recovery-only after repeated failed replans with no movement.
+  state.noRoute = state.route.length === 0;
+  if (state.noRoute || state.failures < 2) return false;
+  // Teleport is recovery-only after repeated failed replans with no movement —
+  // and only when a REAL route exists but the bot is stuck on it. When no
+  // route exists at all the target is unreachable: teleporting the bot between
+  // neighbouring cells cannot change that, it just made it teleport in place
+  // forever (the reported "bot glitches around" bug on an unreachable target).
   const origin = { x: Math.floor(entity.location.x), y: Math.floor(entity.location.y), z: Math.floor(entity.location.z) };
   const candidates = neighbours(entity.dimension, origin);
   // Prefer a cell closer to the target.
@@ -359,6 +396,23 @@ export function moveEntityTowards(entity, target, options = {}) {
     maxRadius: options.maxRadius ?? 28
   });
 
+  // A* found no walkable path at all. Ease to a stop and report the verdict
+  // instead of shoving into the obstacle: routeState() re-checks as soon as
+  // the target moves and at least every 1.5 s, so the bot resumes the moment
+  // a path opens. (Steering blindly at the wall — plus the old in-place
+  // teleports — is what made an unreachable target look like a broken bot.)
+  if (state.noRoute) {
+    stopEntity(entity);
+    setMoveAnim(entity, 0, true);
+    return {
+      success: false,
+      arrived: false,
+      unreachable: true,
+      distance: totalDistance,
+      reason: "No walkable path to the target."
+    };
+  }
+
   if (genuineStuck(state, entity.location)) {
     const recovered = recover(entity, target, state);
     setMoveAnim(entity, recovered ? 0.6 : 0.2);
@@ -367,7 +421,11 @@ export function moveEntityTowards(entity, target, options = {}) {
       arrived: false,
       recovering: true,
       distance: totalDistance,
-      reason: recovered ? "Recovered from a genuine navigation stall." : "Replanning after navigation stall."
+      reason: recovered
+        ? "Recovered from a genuine navigation stall."
+        : state.noRoute
+          ? "No walkable path to the target."
+          : "Replanning after navigation stall."
     };
   }
 

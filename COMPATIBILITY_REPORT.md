@@ -115,3 +115,56 @@ like a player holding the movement keys:
   eases to a stop instead of drifting.
 - Pack/script version bumped to 2.2.0 so the fixed build is distinguishable
   in the join banner.
+
+## v2.2.1 hotfix — unreachable targets, item loss on swap, invalid effect
+
+Five bugs found during a full code audit of the v2.2.0 build:
+
+1. **Items were silently lost on every equipment swap.** `equipItem()`
+   checked the return value of `EquippableComponent.setEquipment()`, but the
+   stable API returns **void** — so every equip "returned" `undefined`, was
+   treated as rejected ("Item is not accepted by the main hand slot"), and
+   skipped the line that puts the previous main-hand item back into the
+   container. The swap itself happened, but the old item (a sword, a food
+   item, a tool) just disappeared. The swap is now verified by reading the
+   slot back, and the previous item is always restored to the container.
+2. **`findLocalRoute()` returned partial "routes" to dead ends.** When A*
+   exhausted its node budget without reaching the goal, it returned a path
+   to the best cell found — for a target inside the search region behind a
+   wall, that is the cell *in front of the wall*. The bot walked there,
+   shoved, got flagged stuck, and entered the recovery loop below. The
+   pathfinder now returns an empty route (the "unreachable" verdict) when
+   the goal is inside the search region but not reached, while a goal outside
+   the region still yields the partial route that powers long-range follow.
+3. **The bot teleported in place on unreachable targets.** With the partial
+   dead-end routes, `recover()` re-planned, found no movement, and — after
+   two failures — teleported the bot to a neighbouring cell… every ~7 s,
+   forever, with no task to fail (a following bot whose owner is in a house
+   or on a ledge). `recover()` now only teleports when a REAL route exists
+   but the bot is stuck on it.
+4. **Unreachable targets caused a full A* replan storm.** `routeState()`
+   treated every empty route as stale, so each 5-tick planning call re-ran
+   the full bounded A* (and `recover()` added a second one every 3.5 s).
+   Empty routes are now tracked as `noRoute`: re-check as soon as the target
+   moves (so recovery is immediate when a path opens) and otherwise at a
+   calm 1.5 s cadence. On a `noRoute` verdict `moveEntityTowards()` eases
+   the bot to a stop and reports `No walkable path to the target.`, so
+   plans fail fast and deterministically (task: "Target unreachable…")
+   instead of churn.
+5. **`useItem()` applied a `"saturation"` effect** — a Java Edition concept
+   that does not exist in Bedrock; the call threw on every meal (swallowed
+   by the "effect optional" catch). Removed; hunger refills itself when the
+   food is consumed.
+
+Related small fixes found in the same audit:
+
+- `collect_item` now fails the action when the dropped item is unreachable
+  instead of returning `pending` forever (the task hung in COLLECTING).
+- `attack_entity` faces the target with `setRotation()` instead of a
+  same-location `teleport()` every swing, which re-synced the whole entity
+  and showed up as a hitch on mobile.
+
+Tests: three new regression tests (unreachable-target behaviour incl. no
+teleport + throttled replans + recovery when a gap opens; collect_item fast
+fail on an unreachable drop; eating only applies valid Bedrock effects and
+restores the previous main-hand item). Pack/script version bumped to 2.2.1.
