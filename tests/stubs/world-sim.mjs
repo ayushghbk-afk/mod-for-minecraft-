@@ -3,7 +3,7 @@
  *
  * `stubs/bedrock.mjs` models just enough of the Script API to load main.js and
  * push a command through it. That is enough for "does the pack wire up", but the
- * acceptance criteria (AC-01..AC-44) are about *gameplay*: does the bot walk to
+ * acceptance criteria (AC-01..AC-45) are about *gameplay*: does the bot walk to
  * a tree, break a log, put it in its inventory, notice a zombie, eat when hurt,
  * remember 5/16 after a reload. None of that can be answered by a stub whose
  * `getEntities()` ignores distances and whose world is empty air.

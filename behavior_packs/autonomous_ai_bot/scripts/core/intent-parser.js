@@ -55,6 +55,42 @@ export function materialToBlock(value) {
   return raw.includes(":") ? raw : `minecraft:${raw.replace(/\s+/g, "_")}`;
 }
 
+/**
+ * "16 oak logs" / "a stack of stone" / "some wood" → { block, count }.
+ *
+ * Shared by the verb form ("get me …") and the bare request ("i need …") so
+ * quantities written the way a player speaks them — a stack, a couple — are
+ * understood instead of being read as the material name.
+ */
+const COUNT_WORDS = Object.freeze({ "a stack": 64, stack: 64, "half a stack": 32, "a couple": 2, couple: 2, "a few": 3, few: 3, some: 1, a: 1, an: 1, the: 1, of: 1 });
+
+/** Words that mean the sentence is conversation, not an order for materials. */
+const ASK_GUARD = /\b(help|know|go|talk|say|sleep|eat|fight|do|be|have|leave|stay|come|follow|stop|wait|see|play|understand|why|how|what)\b/;
+
+function countAndMaterial(phrase) {
+  let rest = String(phrase || "").toLowerCase().replace(/[.,!?]/g, " ").replace(/\s+/g, " ").trim();
+  let count = null;
+  const digits = rest.match(/^(\d{1,3})\s+(.*)$/);
+  if (digits) { count = Math.max(1, Math.min(64, Number(digits[1]))); rest = digits[2]; }
+  if (count === null) {
+    for (const key of ["half a stack", "a stack", "a couple", "a few", "stack", "couple", "few"]) {
+      if (rest.startsWith(`${key} `) || rest === key) {
+        count = COUNT_WORDS[key];
+        rest = rest.slice(key.length).replace(/^\s*(of\s+)?/, "").trim();
+        break;
+      }
+    }
+  }
+  if (count === null && /^(some|a|an|the)\s+/.test(rest)) {
+    count = 1;
+    rest = rest.replace(/^(some|a|an|the)\s+/, "").trim();
+  }
+  if (!rest) return null;
+  const block = materialToBlock(rest);
+  if (!/^minecraft:[a-z0-9_]+$/.test(block)) return null;
+  return { block, count: count ?? 1 };
+}
+
 export function parseIntent(message, botNames) {
   const bot = mentionedBot(message, botNames);
   if (!bot) return null;
@@ -84,13 +120,26 @@ export function parseIntent(message, botNames) {
     return { bot, type: "use_item", item, goal: `Use ${item}` };
   }
 
-  const request = text.match(/\b(?:get|collect|find|mine|gather|fetch|bring)\s+(?:me\s+)?(?:(\d+)\s+)?(.+)/);
+  const request = text.match(/\b(get|collect|find|mine|gather|fetch|bring|grab|chop|cut|dig|stock up on)\s+(?:me\s+)?(.+)/);
   if (request) {
-    const count = Math.max(1, Math.min(64, Number(request[1] || 1)));
-    const block = materialToBlock(request[2]);
-    if (/^minecraft:[a-z0-9_]+$/.test(block)) {
-      return { bot, type: "collect", block, count, goal: `Collect ${count} ${block.replace("minecraft:", "")}` };
+    const verb = request[1];
+    const parsed = countAndMaterial(request[2]);
+    if (parsed) {
+      // "mine 8 stone" and "/aibot:mine stone 8" must create the same kind of
+      // task, or the same words mean different things depending on how they
+      // arrived (AC-03/AC-04).
+      const kind = ["mine", "dig", "chop", "cut"].includes(verb) ? "mine" : "collect";
+      const goal = `${kind === "mine" ? "Mine" : "Collect"} ${parsed.count} ${parsed.block.replace("minecraft:", "")}`;
+      return { bot, type: kind, block: parsed.block, count: parsed.count, goal };
     }
+  }
+  // "I need 10 stone", "i want some oak logs" — a request with the verb left out.
+  // The guard keeps plain conversation ("i want to know…", "i need help") out of
+  // the task path: it only matches when the rest really names a material.
+  const asked = text.match(/\b(?:i\s+)?(?:need|want|would like)\s+(?:to\s+)?(.+)/);
+  if (asked && !ASK_GUARD.test(asked[1])) {
+    const parsed = countAndMaterial(asked[1]);
+    if (parsed) return { bot, type: "collect", block: parsed.block, count: parsed.count, goal: `Collect ${parsed.count} ${parsed.block.replace("minecraft:", "")}` };
   }
   if (/\b(build|make)\b/.test(text)) return { bot, type: "build", goal: text };
 

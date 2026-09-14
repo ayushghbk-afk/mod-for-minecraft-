@@ -14,7 +14,7 @@ This repository contains a Bedrock add-on architecture for a player-like compani
 > error in chat, no bot, and `!aibot create Steve` appears to do nothing. This pack now
 > declares the oldest API level it actually needs instead of the newest one that exists.
 - JavaScript Script API pack; no TypeScript build step is required.
-- The whole pack is exercised by **119 Node tests**, 46 of which drive the real `main.js`, controller, planner, action engine and navigation on a simulated Bedrock world (terrain, gravity, distance-aware entity queries, block-break drops, a per-tick clock, chat and slash-command transports). Every acceptance criterion is marked PASS/FAIL with its evidence in **[`ACCEPTANCE.md`](ACCEPTANCE.md)** — nothing is claimed on the strength of "it compiles".
+- The whole pack is exercised by **146 Node tests**, 47 of which drive the real `main.js`, controller, planner, action engine and navigation on a simulated Bedrock world (terrain, gravity, distance-aware entity queries, block-break drops, a per-tick clock, chat and slash-command transports). Every acceptance criterion is marked PASS/FAIL with its evidence in **[`ACCEPTANCE.md`](ACCEPTANCE.md)** — nothing is claimed on the strength of "it compiles".
 - A live Bedrock client is not available in this repository, so the parts a simulation cannot prove (visible model, on-screen forms, device frame time, chat transport on your specific build, a real world restart) are listed as human checks in `ACCEPTANCE.md` and `DEVELOPMENT.md` instead of being counted as passing.
 
 ## What is implemented
@@ -29,21 +29,22 @@ The behavior pack contains:
 - Verified destroy-mining, real item-entity pickup into the bot inventory, progress tracking and return-to-owner behavior.
 - Hostile mob defense, task pause, attack, threat verification and task resume.
 - Owner-gated natural-language intents and a Bedrock-friendly control panel.
+- **A conversation engine that works with no chat events and no network** (`core/chat-brain.js`): the bot answers from its own live data — task and progress, health, inventory, position, threats, home, time of day — with a deterministic set of voices for the four personalities. It is what `/aibot:talk`, `/aibot:say` and the panel's **Talk** box all reach, and it never leaves a message unanswered.
 - Provider-independent planner interface for fallback, Mideafire, custom and OpenAI-compatible providers.
 - Offline fallback: follow, stop, return, threat response and deterministic task loops keep working when a provider is unavailable.
 
 See the limitations section below before calling this production-ready for a particular world.
 
-## Verified behaviour (v2.4.0)
+## Verified behaviour (v2.5.0)
 
 ```bash
 npm install
-npm run acceptance     # AC-01 … AC-44 as 46 end-to-end tests
-npm test               # acceptance + unit + command + compatibility (119 tests)
+npm run acceptance     # AC-01 … AC-45 as 47 end-to-end tests
+npm test               # acceptance + unit + command + conversation + compatibility (146 tests)
 npm run typecheck
 ```
 
-**44 / 44 acceptance criteria exercised · 36 PASS · 8 PASS with a named in-game check pending · 0 FAIL.**
+**45 / 45 acceptance criteria exercised · 37 PASS · 8 PASS with a named in-game check pending · 0 FAIL.**
 [`ACCEPTANCE.md`](ACCEPTANCE.md) records, per criterion, exactly what was driven and observed —
 and the twelve promise-vs-behaviour bugs that the acceptance work caught and fixed on the way
 (silent `/bot:mine`, a bot that parked itself inside a creeper's blast radius, five-second
@@ -120,6 +121,8 @@ commands exist. Exact controls:
 /aibot:list
 /aibot:remove <name>
 /aibot:info
+/aibot:talk <message>
+/aibot:say <message>
 /aibot:debug on|log|watch|clear|off
 /aibot:test [net]
 ```
@@ -143,17 +146,32 @@ the create form, or the control panel if you already own a bot. Interacting with
 itself also opens the panel. On worlds with cheats enabled,
 `/scriptevent aibot:cmd create Steve` reaches the same handler.
 
-Natural-language examples (the bot name is required):
+## Talking to your bot
+
+On Bedrock 26.x nothing typed in the game's chat box reaches a script — that is the
+`chat: unavailable` line in the join message, and it is why "chat is not working" has an
+answer rather than a workaround. The bot is still talked to in plain sentences, through a
+transport this build really has:
 
 ```text
-Steve, follow me.
-Steve, stop.
-Steve, get me 32 oak logs.
-Steve, mine 20 iron.
-Steve, protect me.
-Steve, come back.
-Steve, show inventory.
+/aibot:talk how are you          → it answers with its live health and what it is doing
+/aibot:talk get me 32 oak logs   → the same verified task a chat order would create
+/aibot:talk any mobs             → what its last scan actually saw, with distances
+/aibot:talk why aren't you moving
 ```
+
+`/aibot:say` is the same command under its old name. Hold a **compass** (or interact with the
+bot) and the panel's first button, **Talk**, opens a text box — the same
+conversation with no commands at all, which is the Android/iOS path.
+
+On a build where chat events still exist (`chat: ok`), the identical sentences work with the
+bot's name in front: `Steve, follow me.` · `Steve, mine 20 iron.` · `Steve, show inventory.`
+
+Replies are generated by the bot itself, from the world it can see — no network is involved
+(a phone's Script API has no outbound HTTP, so a remote model is impossible there and the pack
+does not pretend otherwise). Ask it `are you using AI` and it gives the same answer. The four
+personality settings in the panel change the *voice*; the facts are always read from the live
+task, health, inventory, position and scan.
 
 A raw Bedrock summon is also possible:
 
@@ -178,6 +196,8 @@ For `Steve, get me 32 oak logs`, the deterministic loop is:
 The visible name tag and dynamic properties report actual engine state; an AI response cannot mark a task complete.
 
 ## Provider summary
+
+Spoken replies come from the bot's own conversation engine (`core/chat-brain.js`); a configured provider is consulted only for small talk and questions the engine cannot answer from the world, and only on a host that really has a network transport. If you are asking a phone to run a model, the honest answer is that it cannot.
 
 The default configuration uses the supplied Cloudflare Worker at `https://groq-proxy.mr-hackerdon808.workers.dev/` as an OpenAI-compatible endpoint with model `llama-3.3-70b-versatile`. The model can be changed in the panel. See `AI_PROVIDERS.md` for the request contract. Stable mobile Script API does not provide a generally available outbound HTTP API, so the pack intentionally falls back instead of pretending it can contact a provider. A supported host bridge / dedicated-server integration is still required for the add-on to make outbound requests.
 
@@ -227,6 +247,7 @@ The default configuration uses the supplied Cloudflare Worker at `https://groq-p
 | You see the banner **only once** | Two banners with different versions (e.g. `v1.2.0` and `v1.3.x` at the same time) mean **two copies of the behavior pack are active on that world** — every command is handled twice by two separate scripts and you get doubled messages, two bots with the same name, and `No bot is assigned to you` from the copy that did not create your bot. Fix: *Edit World → Behavior Packs* and **deactivate the older "Autonomous AI Bot" pack**, then save and reload the world. Since v1.3.1 the pack also detects a second running copy automatically (both copies must be v1.3.1+) and prints a red `⚠ Two copies…` warning with these steps. |
 | You see **`No bot is assigned to you`** although a bot exists | Since v1.3.1 this heals itself: the bot's stored owner id is a runtime id that changes every session, so old builds lost track of the owner after a world reload. Update to v1.3.1+ and use `/aibot:status` — the bot is re-bound to you by name automatically. If it still fails, run `/aibot:info` and check the `Duplicate packs:` line. |
 | The join message says **`chat: unavailable`** | That is normal on Bedrock 26.x: Mojang removed chat script events from the stable API, so `!aibot …` typed in chat **cannot** work. Use `/aibot:create Steve` (custom slash command), the **compass** menu, or `/scriptevent aibot:cmd create Steve` with cheats on. |
+| I talk to my bot and it says nothing, or only ever *"Got it"* | Update to **v2.5.0+**: the bot now answers from its own live data. `/aibot:talk how are you` returns real health, `/aibot:talk what are you doing` returns the real task, or hold a **compass** and press its **Talk** button for a text box. If it still answers with one canned line, `/aibot:test` will say why (usually two copies of the pack active). |
 | `Settings → Profile` shows Bedrock **1.26.40+** | Update Minecraft. The pack cannot load on an older engine. |
 | Both **Autonomous AI Bot - Behavior** and **- Resources** are ACTIVE on that world | Activate them in *Edit World*, not just in global storage. |
 | You typed `/aibot:create` (namespaced, with the colon) | A bare `/aibot` has never existed as a slash command; every command is `/aibot:<action>`, e.g. `/aibot:create Steve`, `/aibot:help`. |

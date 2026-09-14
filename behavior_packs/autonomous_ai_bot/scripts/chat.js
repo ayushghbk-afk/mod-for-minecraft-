@@ -1,8 +1,8 @@
-import { parseBotCommand, parseIntent, parseOrder } from "./core/intent-parser.js";
-import { showControlPanel, showCreateBot } from "./ui/control-panel.js";
+import { parseBotCommand, parseIntent } from "./core/intent-parser.js";
+import { handleIntent, runPlayerWords } from "./core/conversation.js";
+import { showControlPanel, showCreateBot, showTalk } from "./ui/control-panel.js";
 import { SCRIPT_VERSION } from "./core/version.js";
-import { chatAvailable, commandHint, noBotMessage } from "./core/hints.js";
-import { pickupNearbyItems } from "./core/inventory.js";
+import { chatAvailable, commandHint, noBotMessage, talkHint } from "./core/hints.js";
 
 function help(player, controller) {
   const lines = [
@@ -13,9 +13,12 @@ function help(player, controller) {
     "§e/aibot:panel§r §8(or §e!aibot panel§8§r) — status, tasks, inventory and settings",
     "§e/aibot:follow | stop | return | protect | cancel | resume§r",
     "§e/aibot:status | inventory | list | info§r, §e/aibot:remove <name>§r",
-    "Talk to the bot by name — it takes tasks and chats back:",
-    "  §fSteve, get me 32 oak logs§r · §fSteve, protect me§r · §fSteve, follow me§r",
-    "  §fSteve, pick up items§r · §fSteve, eat§r · §fSteve, hi§r",
+    "§bTalk to it — this is chat on this build:§r",
+    `  §e${commandHint(controller, "talk how are you")}§r — it answers with live status`,
+    `  §e${commandHint(controller, "talk get me 32 oak logs")}§r — a real, verified task`,
+    `  §e${commandHint(controller, "talk protect me")}§r · §e${commandHint(controller, "talk pick up items")}§r`,
+    `  §7Or hold a §fcompass§r → §fTalk to <name>§r — a text box, no commands needed§r`,
+    chatAvailable(controller) ? "  §7On this build you can also just say §fSteve, how are you§7 in chat.§r" : "  §7Typing in the game's chat box reaches nobody: Mojang removed the chat script events.§r",
     "§e/aibot:debug on§r — test mode: every error the pack catches is printed here, live",
     "§e/aibot:debug log§r — the captured errors (§e/aibot:debug clear§r empties them)",
     "§e/aibot:test§r — check-up of chat, commands, entity, model, movement, mining and persistence",
@@ -146,7 +149,7 @@ export async function handleChat(player, message, controller) {
       }
       case "acceptance":
       case "ac": {
-        // AC-01..AC-44: run the in-world acceptance check-up.
+        // AC-01..AC-45: run the in-world acceptance check-up.
         const handled = await controller.test.handle(player, "acceptance", command.args, controller);
         if (!handled) player.sendMessage("§cThe acceptance runner is not loaded on this build.§r");
         return true;
@@ -174,23 +177,17 @@ export async function handleChat(player, message, controller) {
         return true;
       }
       case "command": player.sendMessage(controller.runNamedCommand(player, command.args[0], command.args.slice(1))); return true;
+      case "talk":
       case "say":
       case "tell":
       case "chat":
       case "ask": {
-        // AC-03 on a build with no chat events: this is the supported way to
-        // *talk* to the bot. The words go through the exact same intent parser
-        // as a chat mention, so "/bot:say collect 16 oak logs" creates the task
-        // and "/bot:say hi" gets a spoken answer.
-        const agent = controller.forPlayer(player);
-        if (!agent) { player.sendMessage(noBotMessage(controller)); return true; }
-        const words = command.args.join(" ").trim();
-        const intent = parseOrder(words, agent.name);
-        if (words && intent && intent.type !== "chat") {
-          await handleIntent(player, intent, agent, controller);
-          return true;
-        }
-        await agent.chatWith(player, words || "hi");
+        // AC-03/AC-45 on a build with no chat events: this is how a player
+        // *talks* to the bot. The words go through the exact same parser as a
+        // chat mention, so "/bot:talk get me 16 oak logs" creates the task and
+        // "/bot:talk how are you" gets a grounded spoken answer. With no words
+        // at all it opens the text form — a chat box, on any build.
+        await talkToBot(player, command.args.join(" "), controller);
         return true;
       }
       default:
@@ -213,62 +210,25 @@ export async function handleChat(player, message, controller) {
 }
 
 /**
- * Execute one parsed intent. Shared by the chat path and the `/bot:say`
- * command path so a player gets identical behaviour whichever transport this
- * build supports (AC-03).
+ * The single "player typed something at their bot" entry point.
+ *
+ * Used by `/aibot:talk`, `/aibot:say`, the panel's Talk form and (with the words
+ * already parsed out of the sentence) by chat mentions. Kept here rather than in
+ * `core/conversation.js` because opening the Talk form is a UI decision, and the
+ * panel imports that core module itself.
+ *
+ * @param {any} player
+ * @param {string} words
+ * @param {any} controller
+ * @returns {Promise<boolean>} whether a bot was there to hear it
  */
-async function handleIntent(player, intent, agent, controller) {
-  switch (intent.type) {
-    case "follow": agent.follow(); break;
-    case "stop": agent.stop(); break;
-    case "come": agent.comeTo(player); break;
-    case "return": agent.returnHome(); break;
-    case "protect": agent.protect(); break;
-    case "cancel": agent.cancel(); break;
-    case "resume": agent.resume(); break;
-    case "inventory": player.sendMessage(agent.inventoryText()); break;
-    case "status": player.sendMessage(agent.statusText()); break;
-    case "task": player.sendMessage(agent.taskText()); break;
-    case "mine":
-      agent.mineTask(intent.block, intent.count ?? 8, intent.goal);
-      break;
-    case "collect":
-      agent.createCollectTask(intent.block, intent.count, intent.goal);
-      break;
-    case "pickup": {
-      // Immediate vacuum + short collect plan so chat "pick up items" works.
-      const result = pickupNearbyItems(agent.entity, 6);
-      if (result.picked > 0) agent.say(`Picked up ${result.picked} stack(s).`, player);
-      else {
-        agent.runtime.plan = {
-          goal: "Pick up nearby items",
-          thought: "Player asked to loot drops.",
-          actions: [{ type: "collect_item", count: 1 }]
-        };
-        agent.runtime.planIndex = 0;
-        agent.say("Looking for dropped items nearby.", player);
-      }
-      break;
-    }
-    case "eat": {
-      // AC-20/AC-21: eat when it makes sense, and say so plainly when there is
-      // nothing to eat instead of promising a meal that cannot happen.
-      agent.eatOnDemand(player);
-      break;
-    }
-    case "use_item": {
-      agent.useHeldItem(intent.item);
-      break;
-    }
-    case "build":
-      agent.say("Building from chat is not auto-created yet — use a validated build plan.", player);
-      break;
-    case "chat":
-      await agent.chatWith(player, intent.text || "");
-      break;
-    default:
-      await agent.chatWith(player, intent.text || "");
-  }
+export async function talkToBot(player, words, controller) {
+  const agent = controller.forPlayer(player);
+  if (!agent) { player.sendMessage(noBotMessage(controller)); return false; }
+  const text = String(words || "").trim();
+  if (!text) { await showTalk(player, agent); return true; }
+  await runPlayerWords(player, text, agent, controller);
+  return true;
 }
 
 export { showCreateBot, reportCreate };

@@ -2,11 +2,27 @@
 
 ## Provider interface
 
-The engine calls one interface:
+The engine calls two interfaces. Planning is the one that changes behaviour:
 
 ```js
 await provider.generatePlan(observation, memory, task)
 ```
+
+and speaking is the optional one:
+
+```js
+await provider.generateChatReply(playerMessage, observation, memory)
+```
+
+`generateChatReply` may only colour in a reply — it can never create a task, and it is never
+allowed to answer something the bot can measure for itself. "Where are you", "how are you" and
+"what are you doing" are answered from live data by `scripts/core/chat-brain.js` without touching
+a socket, so a hung or dead endpoint cannot leave a player without an answer. The provider is
+consulted only for small talk and questions the local engine cannot ground, only when the host
+actually has an HTTP transport, and only after a failure-free minute (a failed call puts the
+provider in a 60 s cooldown and the local answer stands). On a phone none of those conditions
+hold: Bedrock 26.x exposes no outbound HTTP to a client script, so the conversation there is
+entirely local — which is the honest answer to "does it use AI".
 
 It returns a validated object:
 

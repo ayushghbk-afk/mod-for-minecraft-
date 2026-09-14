@@ -39,11 +39,16 @@ export function commandHint(controller, action) {
   return chatAvailable(controller) ? `!aibot ${words.join(" ")}` : `/aibot:${head}${tail}`;
 }
 
-/** How to ask an existing bot to follow you on this build. */
+/**
+ * How to talk to an existing bot on this build — the answer to "chat is not
+ * working". On a build with chat events, saying its name in chat reaches it; on
+ * every other build the words have to arrive through `/aibot:talk` or the
+ * panel's Talk box, because nothing typed in the chat box can reach a script.
+ */
 export function talkHint(controller, name) {
   const safeName = String(name || "your bot");
-  if (chatAvailable(controller)) return `say "§f${safeName}§e, follow me§e"`;
-  return `tap §f${safeName}§e to open its panel, or use §f/aibot:follow§e`;
+  if (chatAvailable(controller)) return `say "§f${safeName}§e, how are you§e" or "§f${safeName}§e, get me 16 oak logs§e"`;
+  return `use §f/aibot:talk how are you§e, or tap §f${safeName}§e and pick §fTalk§e for a text box`;
 }
 
 /** The sentence appended whenever a player has no bot assigned. */

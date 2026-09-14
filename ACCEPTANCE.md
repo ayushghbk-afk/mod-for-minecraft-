@@ -1,6 +1,6 @@
 # ACCEPTANCE — every criterion, exercised and marked
 
-Pack: **Autonomous AI Bot** v2.4.0 · Bedrock **26.40+** · `@minecraft/server` **2.9.0** (stable) ·
+Pack: **Autonomous AI Bot** v2.5.0 · Bedrock **26.40+** · `@minecraft/server` **2.9.0** (stable) ·
 `@minecraft/server-ui` **2.1.0** (stable) · **no experiments, no cheats, no beta APIs.**
 
 This file is the honest record of whether the pack does what it promises. The rule it is held to:
@@ -14,8 +14,8 @@ This file is the honest record of whether the pack does what it promises. The ru
 
 ```bash
 npm install
-npm run acceptance     # the 44 criteria below, as 46 end-to-end tests
-npm test               # acceptance + unit + command + compatibility suites (118 tests)
+npm run acceptance     # the 45 criteria below, as 47 end-to-end tests
+npm test               # acceptance + unit + command + conversation + compatibility suites (146 tests)
 npm run typecheck      # tsc over the pack's scripts
 ```
 
@@ -34,7 +34,7 @@ production code path is stubbed out to make a test pass; the stubs replace only 
 | **PASS †** | Exercised end-to-end in simulation, **and** part of the criterion (pixels, on-screen forms, device frame time, chat transport on a specific build) can only be confirmed by a human in the game. The † note says exactly which part. |
 | **FAIL** | Not met. Recorded with what happens instead. |
 
-**Current tally: 44 / 44 criteria exercised · 36 PASS · 8 PASS † · 0 FAIL.**
+**Current tally: 45 / 45 criteria exercised · 37 PASS · 8 PASS † · 0 FAIL.**
 
 ## A · SPAWN & BASIC LIFE
 
@@ -158,6 +158,12 @@ production code path is stubbed out to make a test pass; the stubs replace only 
 | AC | Criterion | Status | How it was exercised |
 | --- | --- | --- | --- |
 | AC-43 | Save / reload | **PASS †** | The bot, its owner binding, its name, its home and its in-flight task (with progress) are written to dynamic properties and re-adopted on the next load; a bot that cannot be re-adopted is reported rather than silently missing. † *Exercised against a simulated reload (world state cleared, script re-bootstrapped); an actual client restart with a saved world is a human check.* |
+
+## R · CONVERSATION
+
+| AC | Criterion | Status | How it was exercised |
+| --- | --- | --- | --- |
+| AC-45 | Conversation | **PASS** | The bot is asked four things through the real `/bot:talk` transport — `how are you`, `where are you`, `what are you doing`, and a sentence that means nothing (`asdfghjkl`) — and every one of them is answered, in its own name, with **the numbers the world actually has**: the answer reports `7/20` after the bot is wounded to 7 HP, its true coordinates, and the live objective (`Collect 8 oak_log`) once a task exists. An order phrased at the same box (`get me 8 oak logs`) becomes a real `collect` task with block `minecraft:oak_log` and target 8, and `mine 4 stone` becomes the `mine` kind — the same parser, the same engine, whether the words arrive by command, by the panel's Talk form, or as a chat mention. Nothing internal (`[object Object]`, `undefined`, `NaN`) ever appears in a reply. In-world, `/aibot:acceptance` re-runs the same check against the live bot and prints its verdict. |
 
 ## Q · END-TO-END
 

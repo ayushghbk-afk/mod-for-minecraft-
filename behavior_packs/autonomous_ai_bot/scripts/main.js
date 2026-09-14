@@ -168,11 +168,12 @@ const SLASH_COMMANDS = Object.freeze({
   cancel: { description: "Cancel the AI bot's current task", arg: "bot name" },
   resume: { description: "Resume a paused AI bot task", arg: "bot name" },
   eat: { description: "Make your AI bot eat if it is carrying food" },
-  say: { description: "Talk to your bot: /aibot:say collect 8 oak logs", arg: "message" },
+  talk: { description: "Talk to your bot: /aibot:talk how are you", arg: "message" },
+  say: { description: "Same as /aibot:talk", arg: "message" },
   remove: { description: "Despawn your AI bot", arg: "bot name" },
   debug: { description: "Test mode: on | off | log | clear | watch | status", arg: "sub-command" },
   test: { description: "Run the full self-test; add 'net' to also ping the AI endpoint", arg: "net" },
-  acceptance: { description: "Run the AC-01..AC-44 gameplay acceptance check-up in this world" }
+  acceptance: { description: "Run the AC-01..AC-45 gameplay acceptance check-up in this world" }
 });
 
 /**
@@ -491,6 +492,11 @@ export function welcomeLines(chatOk, slashOk) {
     lines.push(`§eChat commands are unavailable on this game build — that is why §f!aibot …§e in chat does nothing.§r`);
     if (slashOk) lines.push(`Run §e/aibot:create Steve§r like any slash command, or hold a §fcompass§r and use it for the menu.`);
     else lines.push(`Hold a §fcompass§r and use it — the menu creates and controls a bot without any commands.`);
+    // "Chat is not working" is answered here: talking to the bot is a slash
+    // command or the panel's Talk box on this build, never the chat box.
+    lines.push(slashOk
+      ? `§7Talk to your bot with §f/aibot:talk how are you§r §7(or §f/aibot:talk get me 16 oak logs§r) — or open the §fcompass§r menu and pick §fTalk§r.§r`
+      : `§7Talk to your bot from the §fcompass§r menu — the §fTalk§r button is a text box.§r`);
     lines.push(`With cheats enabled, §e/scriptevent aibot:cmd create Steve§r also works.`);
   }
   // Two banners with different versions mean two behavior packs are active at

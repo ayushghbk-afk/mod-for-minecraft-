@@ -1,5 +1,5 @@
 /**
- * ACCEPTANCE TESTS — AC-01 … AC-44, exercised rather than asserted.
+ * ACCEPTANCE TESTS — AC-01 … AC-45, exercised rather than asserted.
  *
  * Every criterion below is driven through the same code the game runs: the real
  * `main.js`, the real controller, the real action engine, on top of a simulated
@@ -112,10 +112,10 @@ function itemCount(agent, typeId) {
   return Number([...sim.carrying(agent.entity).entries()].find(([id]) => id === typeId)?.[1] || 0);
 }
 
-test("the pack advertises a version and the in-world acceptance runner knows all 44 criteria", () => {
+test("the pack advertises a version and the in-world acceptance runner knows all 45 criteria", () => {
   assert.match(main.SCRIPT_VERSION, /^\d+\.\d+\.\d+$/);
-  assert.equal(CRITERIA.length, 44, "AC-01..AC-44 must all be runnable in-world");
-  assert.deepEqual(CRITERIA.map((entry) => entry.id), Array.from({ length: 44 }, (_, index) => `AC-${String(index + 1).padStart(2, "0")}`));
+  assert.equal(CRITERIA.length, 45, "AC-01..AC-45 must all be runnable in-world");
+  assert.deepEqual(CRITERIA.map((entry) => entry.id), Array.from({ length: 45 }, (_, index) => `AC-${String(index + 1).padStart(2, "0")}`));
 });
 
 /* ─────────────────────────────── A. existence ─────────────────────────────── */
@@ -1027,4 +1027,49 @@ test("AC-44 full player scenario — create, order, work, fight, finish, report"
   assert.ok(Math.hypot(agent.entity.getVelocity().x, agent.entity.getVelocity().z) < 0.05, "stop means stop");
   assert.equal(teleports(), 0, "the whole scenario ran without a single teleport");
   assert.doesNotMatch(said(owner), /\[object Object\]|undefined|NaN/, "and nothing internal ever reached the player");
+});
+
+/* ─────────────────────────── R. conversation (AC-45) ─────────────────────────── */
+
+test("AC-45 conversation — the bot answers about this world instead of going quiet", () => {
+  const { dim, owner } = freshWorld();
+  const { agent } = spawnBot(owner, "Chatty");
+
+  // Wound it: the answer has to change with the world, or it is a canned line.
+  const health = agent.entity.getComponent("minecraft:health");
+  if (health) health.currentValue = 7;
+
+  slash("bot:talk", owner, "how are you");
+  const hurt = said(owner);
+  assert.match(hurt, /Chatty/, "the bot answers in its own name");
+  assert.match(hurt, /7\/20/, `the health in the answer must be the live health, got: ${hurt}`);
+
+  const here = agent.entity.location;
+  slash("bot:talk", owner, "where are you");
+  const where = said(owner);
+  assert.match(where, new RegExp(`${Math.floor(here.x)}, ?${Math.floor(here.y)}, ?${Math.floor(here.z)}`), `the position must be the live position, got: ${where}`);
+
+  // A real job, then a report about that job.
+  sim.plantOakTree(dim, 6, 4, 4);
+  slash("bot:talk", owner, "get me 8 oak logs");
+  assert.equal(agent.tasks.current?.status, TaskStatus.ACTIVE, "an order typed at the bot is still an order");
+  assert.equal(agent.tasks.current?.kind, "collect");
+  sim.play(10);
+  slash("bot:talk", owner, "what are you doing");
+  const busy = said(owner);
+  assert.match(busy, /8 oak_log|Collect 8 oak_log|\/8/, `the report must name the live task, got: ${busy}`);
+
+  // A mine order goes through the mine path, not the collect path.
+  sim.give(agent.entity, "minecraft:wooden_pickaxe", 1);
+  slash("bot:talk", owner, "mine 4 stone");
+  assert.equal(agent.tasks.current?.kind, "mine", "the word 'mine' must produce a mining task");
+
+  // Nothing gets silence, and nothing internal ever reaches the player.
+  for (const words of ["asdfghjkl", "why is the sky blue", "banana banana banana", "?!"]) {
+    bedrock.world.messages.length = 0;
+    slash("bot:talk", owner, words);
+    const reply = said(owner);
+    assert.ok(reply.includes("[Chatty]"), `"${words}" got no reply`);
+    assert.doesNotMatch(reply, /\[object Object\]|undefined|NaN/, `"${words}" leaked internals: ${reply}`);
+  }
 });
