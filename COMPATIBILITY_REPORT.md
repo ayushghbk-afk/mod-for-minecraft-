@@ -216,3 +216,46 @@ No gameplay rule, action validator, movement tuning or manifest dependency chang
 floor stays `@minecraft/server` 2.9.0 / `@minecraft/server-ui` 2.1.0 on Bedrock 26.40+, and the
 harness degrades to a `SILENT_TEST` no-op whose `guard()` still runs the callback, so agents
 behave identically with or without it. Pack/script version bumped to 2.3.0.
+
+## v2.5.0 — the bot talks back on a build that has no chat events
+
+The report this release answers was literally *"chat is not working"*. Investigating it turned up
+three separate reasons the bot could look mute, and each one is now either fixed or named:
+
+1. **No chat events to listen to.** Stable `@minecraft/server` 2.9.0 has no `chatSend`, so
+   nothing typed into the game's chat box can reach a script. The pack has always said so in the
+   join message (`chat: unavailable`) and offered slash commands — but it never offered a way to
+   hold a *conversation*, which is what a player means by chat.
+2. **A canned fallback.** Free-form lines that were not orders ended at one fixed
+   `Got it. Say a clear order like …` reply, and the AI path that was supposed to do better
+   needed `fetch` — which a phone's script runtime does not have. So the bot could never actually
+   talk back on the build most players are on.
+3. **Three transports, three behaviours.**
+
+What changed:
+
+- **`scripts/core/chat-brain.js` is new**: a deterministic, import-free conversation engine that
+  answers from the bot's own sensors — task and progress, health, inventory, position, threats,
+  home, time of day, what it is doing and why — with per-personality voices and no network
+  dependency whatsoever. It answers *every* line that reaches it; a question it cannot ground
+  says so instead of inventing an answer, and internal values can never leak into a reply.
+- **`/aibot:talk <words>`** is a first-class command (`/aibot:say` still works), and with no words
+  it opens the **Talk** text box, which is also the first button on the compass/bot panel — a
+  real chat box on a build with no chat, no commands and no cheats.
+- **`scripts/core/conversation.js`** owns the single route a player's words take, so a sentence
+  typed in the panel, sent to `/aibot:talk`, or (where it exists) written in chat produces the
+  same task and the same answer. The panel keeps the exchange on screen, so it reads as a
+  conversation rather than a one-shot dialog.
+- **Orders are parsed the way players speak them**: `mine 8 stone` is a mining task, `grab a
+  stack of cobblestone` is a 64-count collect task, and `i need 10 iron`, `a couple of logs`,
+  `some wood` all resolve — while `i need help`, `i want to know …` stay conversation.
+- **A provider can no longer turn a working bot into a silent one**: replies are local-first, the
+  model is consulted only for small talk and ungrounded questions, only where a transport really
+  exists, and a failure or a hang (2.5 s deadline) leaves the local answer standing with a 60 s
+  cooldown.
+
+AC-45 ("conversation") is added to `core/acceptance.js` and to `tests/acceptance.test.mjs`, which
+asserts the answers against the live world (7/20 health after a wound, real coordinates, the live
+objective). `tests/chat-brain.test.mjs` and `tests/conversation.test.mjs` cover the engine and the
+transports. 146 tests, 45 acceptance criteria, `@minecraft/server` 2.9.0 / `server-ui` 2.1.0 on
+Bedrock 26.40+, unchanged.

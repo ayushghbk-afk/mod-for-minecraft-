@@ -25,6 +25,8 @@ registered during the script startup event with `permissionLevel: Any` and
 | `/aibot:resume` | Resume a paused task after recovery |
 | `/aibot:remove <name>` | Despawn a bot you own and free its name |
 | `/aibot:info` | Script version, chat binding, slash registration, tick loop, entity counts and last spawn error |
+| `/aibot:talk <message>` | **Talk to your bot.** `/aibot:talk how are you` answers with its live health/state, `/aibot:talk get me 16 oak logs` creates the verified task, `/aibot:talk any mobs` reports what its scan saw. With no message it opens the Talk text box |
+| `/aibot:say <message>` | The same command under its older name |
 | `/aibot:debug on` | **Test mode**: every error the pack catches is printed in chat, live |
 | `/aibot:debug log [n]` | The captured error log (last `n`, default 15) — newest first, with `×N` repeat counts |
 | `/aibot:debug watch 60` | Verbose tracing for 60 s: bot decisions, movement verdicts, plan results |
@@ -37,12 +39,36 @@ registered during the script startup event with `permissionLevel: Any` and
 The name parameter is optional where it makes sense (`status`, `inventory`, `follow`, `stop`,
 `return`, `protect`, `cancel`, `resume`, `remove`); without it the command targets your own bot.
 
+## Talking to the bot (the answer to "chat is not working")
+
+The bot holds a conversation on every build, including the ones with no chat events:
+
+| Transport | What the player does | Notes |
+|---|---|---|
+| Slash command | `/aibot:talk how are you` · `/aibot:talk mine 8 stone` | Works everywhere, no cheats. `/aibot:say` is the same thing |
+| The panel | Hold a **compass** (or interact with the bot) → **Talk to &lt;name&gt;** | A text box: no commands to remember, the Android/iOS path. The exchange stays on screen above the box |
+| Chat mention | `Steve, how are you` · `Steve, get me 32 oak logs` | Only on builds where the join message says `chat: ok` |
+| Script event | `/scriptevent aibot:cmd say how are you` | Cheats-enabled worlds only |
+
+Answers are produced locally by `core/chat-brain.js` **from the bot's live data**: task and
+progress, health, inventory, position, threats, home, time of day, and what it is doing right
+now. A question it cannot answer from the world is admitted ("I can't answer that one") rather
+than invented. The four personality settings change the voice, never the facts. Because no
+client Script API exposes outbound HTTP, no remote model is involved in a phone's replies —
+ask `are you using AI` and the bot says exactly that.
+
+Examples that get a grounded answer: `how are you` · `what are you doing` · `where are you` ·
+`what do you have` · `any mobs` · `is it night` · `where is your home` · `why aren't you
+moving` · `what can you do` · `can you fly` · `thanks` · `tell me a joke`. Orders that create a
+real task: `get me 16 oak logs` · `mine 8 stone` · `i need 10 iron` · `grab a stack of
+cobblestone` · `pick up items` · `follow me` · `protect me` · `eat` · `stop`.
+
 ## Chat commands (only on builds where chat events exist)
 
 If the join message says `chat: ok`, the same actions also work as chat messages with the
 `!` prefix. On Bedrock 26.x builds it says `chat: unavailable` — Mojang removed the
 `chatSend` events from the stable script API, so **nothing typed in chat can reach the
-script** and the slash commands above are the only text interface.
+script**; `/aibot:talk` and the panel's Talk box are the text interface instead.
 
 | Command | Effect |
 |---|---|
@@ -89,6 +115,8 @@ mode is the answer to that class of report.
 
 | Command | What it does |
 |---|---|
+| `/aibot:talk <message>` | **Talk to your bot.** `/aibot:talk how are you` answers with its live health/state, `/aibot:talk get me 16 oak logs` creates the verified task, `/aibot:talk any mobs` reports what its scan saw. With no message it opens the Talk text box |
+| `/aibot:say <message>` | The same command under its older name |
 | `/aibot:debug on` | Echoes every error into chat, tagged `[TEST]`. Identical errors are folded into `×N` (20 s window) so a per-tick failure cannot flood the chat, and at most 6 lines are released per flush. |
 | `/aibot:debug log` | The last 30 captured problems — **including ones from before test mode was turned on**, and from before the last world reload. |
 | `/aibot:debug watch 60` | Also traces non-error decisions (follow verdicts, action failures, plan requests) for a bounded window. |

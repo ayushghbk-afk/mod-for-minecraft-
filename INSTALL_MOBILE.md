@@ -19,14 +19,14 @@ The same workflow also uploads GitHub Actions artifacts named `bedrock-mobile-mo
 3. Play → create or edit a world → **Behavior Packs** and **Resource Packs**.
 4. Activate **Autonomous AI Bot - Behavior** and **Autonomous AI Bot - Resources**.
 5. If the world asks for Script / Beta APIs, enable only that experiment. Do not enable extra experiments.
-6. Enter the world and run `!aibot create Steve`.
+6. Enter the world and run `/aibot:create Steve` (Bedrock 26.x has no chat events, so plain chat commands do not work — the join message says `chat: unavailable`).
 
 ## iOS / iPadOS
 
 1. Download the `.mcaddon` in Safari or the GitHub app.
 2. Open it in **Files**, then Share → **Minecraft**.
 3. Activate both packs on the world as above.
-4. Run `!aibot create Steve` in chat.
+4. Run `/aibot:create Steve`, then talk to it with `/aibot:talk how are you`.
 
 ## Windows / other Bedrock
 
@@ -55,6 +55,21 @@ Double-click `AI-Bot-Bedrock-Mobile.mcaddon`, or copy the `.mcpack` files into M
 6. **Still nothing?** Hold a **compass** and use it to open the create form, or tap/interact
    with the bot to open its panel. With cheats on, `/scriptevent aibot:cmd create Steve` also
    reaches the bot.
+
+## Talking to your bot (mobile)
+
+Nothing typed in the game's chat box reaches a script on Bedrock 26.x, so the bot is talked to
+through a box this build really has:
+
+- **Hold a compass** and pick the first button, **Talk** — type anything: `how are you`,
+  `where are you`, `get me 16 oak logs`. The answer stays on screen under your line, so it
+  reads like a conversation.
+- Or from the command line: `/aibot:talk how are you`, `/aibot:talk mine 8 stone`.
+  `/aibot:say` is the same command.
+
+The bot answers from what it can actually see (task and progress, health, inventory, position,
+mobs nearby), so you can use it to check what it is doing. It needs no network and no AI key:
+a phone's script runtime has no outbound HTTP, which is why the replies are generated locally.
 
 Other checks: import the `.mcaddon`, not a hand-renamed zip; activate **both** packs (the
 resource pack depends on the behavior pack); on a multiplayer server, ask the owner whether

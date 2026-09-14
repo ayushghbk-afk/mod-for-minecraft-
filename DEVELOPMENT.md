@@ -65,6 +65,14 @@ command path testable outside Bedrock, so it asserts that:
 - `/aibot:remove` frees a name for re-creation;
 - a failed `spawnEntity` produces an actionable error instead of silence.
 
+`tests/conversation.test.mjs` and `tests/chat-brain.test.mjs` cover the conversation itself
+(AC-45): the same sentence produces the same task whether it arrives as a chat mention, as
+`/aibot:talk`, or through the panel's Talk form; every category of question is answered rather
+than dropped, with the numbers read from the live bot (health after it is wounded, its real
+coordinates, the objective it is actually working on); a question the engine cannot ground says
+so instead of inventing an answer; a provider that fails or hangs still leaves a spoken answer;
+and no reply ever contains an internal value (`undefined`, `NaN`, `[object Object]`).
+
 `tests/testmode.test.mjs` covers the diagnostic plane itself: errors are recorded with test
 mode off and echoed with it on; 25 identical failures become one chat line plus `×25`; the
 per-agent tick guard keeps a healthy bot ticking while a throwing one is reported once; the
@@ -94,7 +102,14 @@ minimum game version.
 
 Stable `@minecraft/server` 2.x (Bedrock 26.x) ships **no** `world.beforeEvents.chatSend` /
 `world.afterEvents.chatSend`; they were removed in 2.0.0 and only exist in beta builds again
-since ~2.12.0-beta. The pack therefore registers namespaced **custom slash commands**
+since ~2.12.0-beta. That is why "chat is not working" is a real report with a real answer: the
+player's words have to reach the script through a transport this build actually has.
+`scripts/core/conversation.js` owns that one path — `runPlayerWords()` decides whether a line is
+a task or a conversation, and `core/chat-brain.js` produces the reply from live data with no
+network at all — so `/aibot:talk`, the panel's Talk form and a real chat mention cannot drift
+apart. When adding a new way for a player to type at the bot, route it through `runPlayerWords`
+rather than re-implementing the branch. The pack therefore registers namespaced **custom slash
+commands**
 (`/aibot:create`, `/aibot:help`, …) in `system.beforeEvents.startup` and a `/scriptevent aibot:cmd …`
 bridge. When touching command code remember the registry's hard rules: names must be
 namespaced, parameter types must be `CustomCommandParamType` values, and `cheatsRequired: false`

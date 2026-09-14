@@ -10,9 +10,10 @@ import { countItem, equipItem, FOOD_ITEMS, itemName, pickupNearbyItems, readInve
 import { BotState, readBotStatus, setBotStatus } from "./status.js";
 import { fallbackPlan, safeFallback } from "./planner.js";
 import { providerFor } from "./ai-provider.js";
+import { describeTopic, replyToMessage } from "./chat-brain.js";
 import { applyPlayerStep, clearRoute, isSafeCell, StuckDetector, stopEntity } from "./navigation.js";
 import { validateNamedCommand, canUseBot } from "./permissions.js";
-import { commandHint, talkHint, noBotMessage } from "./hints.js";
+import { chatAvailable, commandHint, talkHint, noBotMessage } from "./hints.js";
 import { assess, Behavior, evaluateCommand, HEALTH, priorityName, Priority } from "./priority.js";
 import { explainFailure, Reporter } from "./reporter.js";
 import { chooseTool, chooseWeapon, toolGapMessage } from "./tools.js";
@@ -168,7 +169,9 @@ class BotAgent {
       //     explicitly abandoned with a reason instead of silently vanishing.
       interruption: null,
       // --- AC-41: per-bot cost counters, reported by /aibot:info.
-      scans: 0, scannedCells: 0, scannedEntities: 0, scanMs: 0, chatLines: 0, replans: 0
+      scans: 0, scannedCells: 0, scannedEntities: 0, scanMs: 0, chatLines: 0, replans: 0,
+      /** AC-45: the last thing the player asked and what the bot answered. */
+      lastChat: null, chatProviderDownUntil: 0
     };
     this.status = readBotStatus(entity);
     this.setName();
@@ -213,42 +216,152 @@ class BotAgent {
     }
   }
 
-  /** Handle a free-form chat line directed at this bot (not a structured intent). */
+  /**
+   * AC-45: everything the conversation engine is allowed to say, read live.
+   *
+   * The brain receives data, never promises. When the observation has not run
+   * yet, the fields are simply absent and it answers "I don't have a clean
+   * reading for that" — which is what makes "the bot claimed it saw diamond"
+   * impossible. Nothing here writes to the world.
+   */
+  chatContext(player = null) {
+    const observation = this.observation;
+    const status = readBotStatus(this.entity);
+    const task = this.tasks.current;
+    const inventory = readInventory(this.entity);
+    const health = this.healthSnapshot();
+    const owner = this.owner();
+    const speaker = player || owner;
+    const chatOn = chatAvailable(this.controller);
+    const talkHow = chatOn
+      ? `say "§f${this.name}§e, <words>" in chat`
+      : "§f/aibot:talk <words>§e, or the §fTalk§e button on my panel";
+    let location = null;
+    try { location = this.entity.location; } catch { /* entity unloaded */ }
+    const position = location ? [Math.floor(location.x), Math.floor(location.y), Math.floor(location.z)] : null;
+    let ownerDistance = observation?.owner?.distance;
+    let ownerDirection = observation?.owner?.direction?.compass;
+    if (ownerDistance === undefined && speaker?.location && location) {
+      try {
+        ownerDistance = Math.hypot(speaker.location.x - location.x, speaker.location.y - location.y, speaker.location.z - location.z);
+      } catch { ownerDistance = undefined; }
+    }
+    const food = inventory.slots
+      .filter((item) => FOOD_ITEMS.some(([foodId]) => foodId === item.id))
+      .map((item) => item.name)
+      .slice(0, 3);
+    return {
+      botName: this.name,
+      playerName: speaker?.name || this.ownerName || "",
+      personality: this.config.personality,
+      turn: this.runtime.tick,
+      state: status.state,
+      task: task ? {
+        goal: task.goal, progress: task.progress, target: task.target, remaining: task.remaining,
+        status: task.status, block: task.block, interruption: task.interruption?.reason || ""
+      } : null,
+      health,
+      inventory: inventory.summary,
+      freeSlots: inventory.freeSlots,
+      food,
+      position,
+      dimension: (() => { try { return this.entity.dimension.id; } catch { return ""; } })(),
+      home: this.runtime.home ? positionArray(this.runtime.home) : null,
+      ownerDistance,
+      ownerDirection,
+      threats: (observation?.threats || []).slice(0, 3).map((threat) => ({ type: threat.type, name: threat.name, distance: threat.distance })),
+      danger: observation?.danger === true,
+      follow: Boolean(this.runtime.follow),
+      followVerdict: this.runtime.lastFollowResult,
+      priorityReason: this.runtime.priority?.reason || "",
+      timeOfDay: (() => { try { return world.getTimeOfDay(); } catch { return undefined; } })(),
+      providerModel: this.config.model || "",
+      providerConfigured: this.config.provider !== "fallback",
+      // A phone's Script API has no fetch; only a host bridge does. Telling a
+      // player "the AI is thinking" on a build that cannot reach the network
+      // would be the same lie the chat hints exist to prevent.
+      providerReachable: typeof globalThis.fetch === "function",
+      chatAvailable: chatOn,
+      talkHow,
+      lastTopic: this.runtime.lastChat?.topic || "",
+      lastReplyTo: this.runtime.lastChat?.asked || ""
+    };
+  }
+
+  /**
+   * Whether a spoken line may be handed to a configured provider: only when one
+   * is configured, this host really has an HTTP transport, and the last attempt
+   * did not just fail. A phone fails all three (no fetch at all), which is why
+   * the bot's conversation is local there.
+   */
+  chatProviderUsable() {
+    if (this.config.provider === "fallback") return false;
+    if (typeof globalThis.fetch !== "function") return false;
+    return Date.now() >= Number(this.runtime.chatProviderDownUntil || 0);
+  }
+
+  /** Remember an informational answer, so the Talk box can show the exchange. */
+  noteAnswer(asked, reply, topic) {
+    this.runtime.lastChat = { asked: String(asked || "").slice(0, 200), reply: String(reply || ""), topic: topic || "status", source: "local", at: Date.now(), turn: this.runtime.tick };
+  }
+
+  /** Remember that the player's last line became an order, for reply continuity. */
+  noteOrder(words) {
+    this.runtime.lastChat = { asked: String(words || "").slice(0, 200), reply: "", topic: "orders", source: "order", at: Date.now(), turn: this.runtime.tick };
+  }
+
+  /**
+   * Handle one free-form line directed at this bot (AC-45).
+   *
+   * A host provider is asked only when this host genuinely has an HTTP
+   * transport (a bridge or a dedicated server — a phone has none, and pretending
+   * otherwise is how "the bot never answers" used to happen). Everything else is
+   * answered locally by core/chat-brain.js from live data, so the bot says
+   * something true and specific instead of one canned sentence.
+   */
   async chatWith(player, message) {
-    const text = String(message || "").trim();
-    if (!text) return;
-    this.memory.playerRequest(text);
-    // Lightweight local replies so the bot always "talks back" even without AI.
-    const lower = text.toLowerCase();
-    if (/\b(hi|hello|hey|howdy|yo)\b/.test(lower)) {
-      this.say(`Hey ${player.name}! What do you need?`, player);
-      return;
-    }
-    if (/\b(thank|thanks|thx)\b/.test(lower)) {
-      this.say("Anytime.", player);
-      return;
-    }
-    if (/\b(how are you|you ok|status)\b/.test(lower)) {
-      this.say(this.statusText().replace(/\n/g, " · "), player);
-      return;
-    }
-    if (/\b(help|what can you)\b/.test(lower)) {
-      this.say(`I can follow, mine, collect, protect, pick up drops, use items, and fight. Try "${this.name}, get me 16 oak logs" or "${this.name}, protect me".`, player);
-      return;
-    }
-    // Try the AI provider for a short spoken reply + optional plan when a task is active.
-    if (this.config.provider !== "fallback") {
+    const asked = String(message || "").trim();
+    this.memory.playerRequest(asked || "(empty)");
+    const context = this.chatContext(player);
+    // The player's words are shown to the provider as data and nothing else:
+    // no reply can become an action, and the deterministic engine still decides
+    // everything the bot actually does.
+    const local = replyToMessage(asked, context);
+    let reply = local.reply;
+    let source = "local";
+    let topic = local.topic;
+    // A model may colour in what the bot cannot answer from its own sensors —
+    // never the things it can. "Where are you" must come from the live position,
+    // not from a language model's imagination, and it must not wait on a socket
+    // either (AC-45). Only small talk and unanswerable questions consult a
+    // provider, and only on a host that really has one.
+    if (asked && (local.topic === "question" || local.topic === "smalltalk") && this.chatProviderUsable()) {
       try {
         const provider = providerFor(this.config);
         if (provider?.generateChatReply) {
-          const reply = await provider.generateChatReply(text, this.observation, this.memory.promptContext(this.tasks.current));
-          if (reply) { this.say(reply, player); return; }
+          // A host bridge that hangs must not leave the player without an
+          // answer: the local reply is already in hand, so it is used if the
+          // model is slow. `setTimeout` is not part of the script runtime on
+          // every build, so the deadline is only raced in when it exists —
+          // otherwise the provider's own timeout is the only one.
+          const pending = provider.generateChatReply(asked, this.observation, this.memory.promptContext(this.tasks.current));
+          const deadline = typeof setTimeout === "function"
+            ? new Promise((resolve) => setTimeout(() => resolve(""), 2500))
+            : null;
+          const spoken = String(await (deadline ? Promise.race([pending, deadline]) : pending) || "").trim();
+          if (spoken) { reply = spoken; source = "provider"; topic = ""; }
         }
-      } catch {
-        // Fall through to the deterministic ack.
+      } catch (error) {
+        // Recorded, never shown: a provider that is down must not become a bot
+        // that is down. The local answer above stands, and the failure is not
+        // retried on every line the player types.
+        this.runtime.chatProviderDownUntil = Date.now() + 60000;
+        this.test.warn("chat provider", String(error?.message || error).slice(0, 160), { context: `${this.name} answering "${asked.slice(0, 40)}"` });
       }
     }
-    this.say(`Got it. Say a clear order like "follow me", "protect me", "get me 20 iron", or "stop".`, player);
+    this.runtime.lastChat = { asked: asked.slice(0, 200), reply, topic: topic || "provider", source, at: Date.now(), turn: this.runtime.tick };
+    this.memory.event(`answered: ${describeTopic(topic || "provider")}`, "chat");
+    this.say(reply, player);
   }
   persist(force = false) {
     if (!force && this.runtime.tick - this.runtime.lastPersistAt < 100) return;

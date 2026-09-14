@@ -413,7 +413,7 @@ export class TestMode {
       case "net":
       case "ping":
         return this.runSelfTest(player, controller, { deep: true, only: "network" });
-      // The gameplay acceptance run (AC-01..AC-44). Probes that touch the world
+      // The gameplay acceptance run (AC-01..AC-45). Probes that touch the world
       // are opt-in by name: `mine` places and breaks one stone block, `move`
       // follows the player for six seconds and measures the distance closed.
       case "acceptance":
@@ -430,7 +430,7 @@ export class TestMode {
           "§f/aibot:debug clear§r — empty the log (it survives world reloads)",
           "§f/aibot:debug status§r — mode, counters and loop liveness",
           "§f/aibot:test§r — full check-up: chat, commands, entity, model, movement, mining, persistence",
-          "§f/aibot:acceptance§r — the AC-01..AC-44 gameplay acceptance verdicts, measured in this world",
+          "§f/aibot:acceptance§r — the AC-01..AC-45 gameplay acceptance verdicts, measured in this world",
           "§f/aibot:acceptance mine move§r — also run the two world-touching probes; §fmanual§r prints the human steps",
           "§f/aibot:test net§r — the same, plus a real request to the AI endpoint",
           "§7On builds with chat events these are also §f!aibot debug …§7 / §f!aibot test§7, and the panel has the same buttons§r"

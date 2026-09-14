@@ -11,13 +11,13 @@ The control panel is available with the `/aibot:panel` slash command (or `!aibot
 | Provider | `fallback` | `fallback`, `mideafire`, `custom`, `openai-compatible` |
 | Endpoint | empty | Prefer a secure proxy endpoint, not a provider key-bearing URL |
 | Model | empty | Provider model name |
-| Personality | `friendly` | `friendly`, `focused`, `quiet`, `protective`; affects provider context only |
+| Personality | `friendly` | `friendly`, `focused`, `quiet`, `protective`; changes the voice of the bot's spoken replies and the provider context — never the facts it reports |
 | Combat mode | `defend_owner` | `passive`, `defend_owner`, `hostile_mobs`, `defend_self` |
 | Commands | `false` | Named allowlist is still enforced when enabled |
 | Debug | `false` | Per-bot diagnostic dump every 5 s (state, target, plan, validation). `/aibot:debug on` turns this **and** world-wide test mode on together; `!aibot debug bot on` is the per-bot-only form |
 | Owner only | `true` | Natural-language instructions are owner-gated |
 | Observation radius | `8` | Clamped to 4–12 blocks |
-| AI cooldown | `10000 ms` | Provider requests are throttled |
+| AI cooldown | `10000 ms` | Provider requests are throttled. Conversation never waits on a provider: a spoken answer is generated locally from live data, and a configured provider is only consulted for small talk and questions the local engine cannot answer, on hosts that really have a network transport |
 | Max plan actions | `8` | Hard safety limit |
 
 The exact bounded defaults are in `behavior_packs/autonomous_ai_bot/scripts/core/config.js`.

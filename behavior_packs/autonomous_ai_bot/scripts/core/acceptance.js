@@ -10,6 +10,7 @@
  *   §a✔§r AC-11 block recognition — saw minecraft:stone ×4, minecraft:oak_log ×7
  *   §c✖§r AC-16 tool selection    — holding wooden_pickaxe for diamond_ore
  *   §e☐§r AC-44 end-to-end        — MANUAL: 26-step script printed below
+ *   §a✔§r AC-45 conversation      — answered "how are you" with 17/20, and "get me 8 oak_log" would order
  *
  * Three verdicts exist on purpose:
  *   pass   — measured here, in this world, just now;
@@ -30,6 +31,8 @@ import { observedCount } from "./observation.js";
 import { TaskManager } from "./task-manager.js";
 import { validatePlan } from "./action-validator.js";
 import { SCRIPT_VERSION } from "./version.js";
+import { describeTopic, replyToMessage } from "./chat-brain.js";
+import { parseOrder } from "./intent-parser.js";
 
 /** Result rows are kept so they can be persisted and compared after a reload. */
 const RESULT_PROPERTY = "aibot:acceptance";
@@ -85,7 +88,8 @@ export const CRITERIA = Object.freeze([
   { id: "AC-41", group: "O", title: "No tick flooding", mode: "auto" },
   { id: "AC-42", group: "O", title: "Multiple bots", mode: "auto" },
   { id: "AC-43", group: "P", title: "Save / reload", mode: "auto" },
-  { id: "AC-44", group: "Q", title: "Full player scenario", mode: "manual" }
+  { id: "AC-44", group: "Q", title: "Full player scenario", mode: "manual" },
+  { id: "AC-45", group: "R", title: "Conversation", mode: "auto" }
 ]);
 
 const GROUPS = Object.freeze({
@@ -539,6 +543,34 @@ export async function runAcceptance(options = {}) {
     report.add("AC-43", allKeys ? "pass" : "fail",
       allKeys ? `task, memory, owner, home and name are all persisted on the entity and parse cleanly — quit to title and re-enter to confirm the restore` : `missing or unparsable persistence: ${JSON.stringify(persisted)} parseOk=${parseOk}`,
       allKeys ? "" : "the bot would lose its state on reload — check /aibot:debug log for a rejected dynamic-property write");
+    // ────────────────────────────────────────────────────── R · CONVERSATION
+    // AC-45: asked a question, the bot must answer from what it can see — with
+    // the live numbers, not a canned sentence, and never with silence. This is
+    // the check for "chat is not working": on a build with no chat events, the
+    // answer arrives through /aibot:talk or the panel's Talk box, and the words
+    // must belong to this world.
+    const speaker = tryRun(() => agent.owner(), null) || player || null;
+    const chatContext = tryRun(() => agent.chatContext(speaker), null);
+    const answers = chatContext ? [
+      { q: "how are you", a: replyToMessage("how are you", { ...chatContext, turn: (chatContext.turn || 0) + 1 }) },
+      { q: "what are you doing", a: replyToMessage("what are you doing", { ...chatContext, turn: (chatContext.turn || 0) + 2 }) },
+      { q: "where are you", a: replyToMessage("where are you", { ...chatContext, turn: (chatContext.turn || 0) + 3 }) },
+      { q: "zzz unknown sentence", a: replyToMessage("zzz unknown sentence", { ...chatContext, turn: (chatContext.turn || 0) + 4 }) }
+    ] : [];
+    const spoken = answers.filter((entry) => entry.a?.reply?.length > 0);
+    const clean = spoken.every((entry) => !/undefined|NaN|\[object Object\]/.test(entry.a.reply));
+    const grounded = answers.slice(0, 3).every((entry) => (
+      entry.q === "how are you" ? /\d+\/\d+/.test(entry.a.reply)
+        : entry.q === "what are you doing" ? /task|standing by|following|no job/i.test(entry.a.reply)
+          : /\d+, ?-?\d+, ?-?\d+/.test(entry.a.reply)
+    ));
+    const topics = answers.map((entry) => describeTopic(entry.a?.topic)).filter(Boolean);
+    // The order path is checked without running it: the runner must not start
+    // mining somebody's world, it only proves the words would become a task.
+    const wouldOrder = tryRun(() => ["collect", "mine"].includes(parseOrder("get me 8 oak logs", agent.name)?.type), false);
+    report.add("AC-45", spoken.length === answers.length && clean && grounded && wouldOrder ? "pass" : "fail",
+      `${spoken.length}/${answers.length || 0} conversational answers produced (${topics.join(", ")}) · best: "${spoken[0]?.a?.reply?.slice(0, 90) || "-"}"`,
+      spoken.length === answers.length && clean && grounded && wouldOrder ? "" : "a question went unanswered or was answered with something that is not in this world — /aibot:debug log has the recorded exchange");
     report.manual("AC-44", "26-step end-to-end scenario — /aibot:acceptance manual prints it");
 
     report.render();

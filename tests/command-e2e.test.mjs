@@ -137,7 +137,7 @@ test("custom slash commands register alongside chat and /aibot:create works", ()
   };
   bedrock.fireStartup(registry);
 
-  assert.equal(registrations.size, 46, "slash commands must register even when chat also works (23 actions × aibot:/bot:)");
+  assert.equal(registrations.size, 48, "slash commands must register even when chat also works (24 actions × aibot:/bot:)");
   const player = bedrock.addPlayer("Slasher");
   const result = registrations.get("aibot:create").callback({ sourceEntity: player }, "Slashy");
   assert.equal(result.status, bedrock.CustomCommandStatus.Success);

@@ -1,5 +1,7 @@
 import { ActionFormData, ModalFormData } from "@minecraft/server-ui";
-import { commandHint } from "../core/hints.js";
+import { commandHint, talkHint } from "../core/hints.js";
+import { describeTopic } from "../core/chat-brain.js";
+import { runPlayerWords } from "../core/conversation.js";
 
 function botFor(controller, player) { return controller.forPlayer(player); }
 
@@ -15,7 +17,11 @@ export async function showControlPanel(player, controller) {
   }
   const form = new ActionFormData()
     .title(`AI BOT — ${agent.name}`)
-    .body(`${agent.statusText()}\n\n§7Test mode: ${controller.test?.enabled ? "§aON§r§7 — errors are printed in chat" : "§coff§r§7 — use Diagnostics below if something is wrong"}§r`)
+    // Talk is the FIRST button on purpose: on a build without chat events this
+    // form is the only place a player can type to their bot, and it is what
+    // "chat" means here (AC-45).
+    .body(`${agent.statusText()}\n\n§7Talk to ${agent.name} below — on this build, that is chat.§r\n§7Test mode: ${controller.test?.enabled ? "§aON§r§7 — errors are printed in chat" : "§coff§r§7 — use Diagnostics below if something is wrong"}§r`)
+    .button(`Talk to ${agent.name}`)
     .button("Tasks")
     .button("Inventory")
     .button("Settings")
@@ -24,11 +30,53 @@ export async function showControlPanel(player, controller) {
     .button("Close");
   const response = await form.show(player);
   if (response.canceled) return;
-  if (response.selection === 0) return showTasks(player, agent);
-  if (response.selection === 1) return showInventory(player, agent);
-  if (response.selection === 2) return showSettings(player, agent);
-  if (response.selection === 3) return showMemory(player, agent);
-  if (response.selection === 4) return showDiagnostics(player, controller);
+  if (response.selection === 0) return showTalk(player, agent);
+  if (response.selection === 1) return showTasks(player, agent);
+  if (response.selection === 2) return showInventory(player, agent);
+  if (response.selection === 3) return showSettings(player, agent);
+  if (response.selection === 4) return showMemory(player, agent);
+  if (response.selection === 5) return showDiagnostics(player, controller);
+}
+
+/**
+ * AC-45 — the typed conversation, on every build.
+ *
+ * A phone on Bedrock 26.x has no chat events and no way to type at a script, so
+ * "chat is not working" is literally true until this form exists. What the player
+ * types goes through `runPlayerWords()` — the same route `/aibot:talk` and a real
+ * chat line take — so an order typed here creates a task and a question gets the
+ * same grounded answer a chat line would.
+ *
+ * The box re-opens with the exchange above it, which is the difference between
+ * "a text field" and a conversation. Exported because `/aibot:talk` with no
+ * words, a tap on the bot and the compass menu all open this one surface.
+ */
+export async function showTalk(player, agent, options = {}) {
+  const last = agent.runtime.lastChat;
+  const lines = [];
+  if (last?.asked) lines.push(`§7You: §f${String(last.asked).slice(0, 80)}§r`);
+  if (last?.reply) lines.push(`§b${agent.name}:§r ${String(last.reply).split("\n").slice(0, 3).join(" · ").slice(0, 240)}`);
+  else if (last?.topic === "orders") lines.push(`§b${agent.name}:§r §7on it — the order is on my task list§r`);
+  else lines.push(`§7Say anything: "how are you", "where are you", "any mobs" — or give an order: "get me 16 oak logs", "mine 8 stone", "follow me".§r`);
+  if (options.hint) lines.push(`§8${options.hint}§r`);
+  // A modal form has no body text, so the transcript is rendered as labels above
+  // the box. That is what makes the box read as the middle of a conversation.
+  const form = new ModalFormData().title(`Talk to ${agent.name}`);
+  for (const line of lines.slice(0, 3)) form.label(line);
+  form.textField(`Message or order (§8last: ${describeTopic(last?.topic) || "nothing yet"}§8)`, "e.g. how are you / mine 8 stone", { defaultValue: "" });
+  const response = await form.show(player);
+  if (response.canceled || !response.formValues) return;
+  const words = String(response.formValues[0] || "").trim();
+  if (!words) return showControlPanel(player, agent.controller);
+  // Same parser and same reply engine as /aibot:talk and a chat mention, so an
+  // order typed here really becomes a task (AC-45).
+  const route = await runPlayerWords(player, words, agent, agent.controller);
+  // Re-open with the exchange in the body: that is what makes it read as a
+  // conversation rather than a one-shot dialog.
+  const hint = route === "order" ? "Order accepted — /aibot:task shows its progress."
+    : route === "query" ? "That is the full report; /aibot:status prints it again any time."
+    : "";
+  return showTalk(player, agent, { hint });
 }
 
 /**
